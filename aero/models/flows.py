@@ -234,6 +234,7 @@ class Flow(SQLModel, table=True):
             if self._has_new_input(require_all=self.policy == TriggerEnum.ALL_INPUT):
                 logger.info("flow %s: inputs are new, submitting run", self.id)
                 GLOBUS_CLIENT.run_flow(
+                    id=self.id,
                     endpoint_uuid=self.user_endpoint,
                     function_uuid=self.function_id,
                     pull_function_uuid=self.pull_function_id,
