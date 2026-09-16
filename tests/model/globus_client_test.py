@@ -15,6 +15,7 @@ from aero.globus.utils import FLOW_IDS
 
 SRC = "8908fc25-4f6d-46ea-814e-af4d2efcfbb5"
 OTHER = "11111111-1111-1111-1111-111111111111"
+FLOW_ID = "6a7afff7-2c5e-4a1e-9a4d-0f3c2b1d8e90"
 TRIGGER = "http://minio:9000/traffic/a.xml.gz"
 SIGNED = f"{TRIGGER}?X-Amz-Signature=abc"
 
@@ -30,6 +31,7 @@ def sent_fixture(monkeypatch):
     class _FlowClient:
         def run_flow(self, body, label, run_managers):
             captured.update(body)
+            captured["_label"] = label
             return _Resp()
 
     monkeypatch.setitem(
@@ -56,6 +58,7 @@ def tasks_fixture():
 
 
 def _run(tasks, **extra):
+    extra.setdefault("id", FLOW_ID)
     GLOBUS_CLIENT.run_flow(
         endpoint_uuid="e",
         function_uuid="f",
@@ -101,3 +104,23 @@ def test_trigger_without_a_signature_still_injects(sent, tasks):
     report = sent["tasks"][0]["kwargs"]["aero"]["input_data"]["report"]
     assert report["trigger_url"] == TRIGGER
     assert "signed_url" not in report
+
+
+def test_the_run_label_names_the_flow(sent, tasks):
+    """Every analysis run used to carry the same constant label.
+
+    With nothing but "AERO Demo | User flow" in the Globus run list, runs of
+    different analyses were indistinguishable.
+    """
+    _run(tasks)
+
+    assert sent["_label"] == f"AERO Analysis flow {FLOW_ID[:8]}"
+
+
+def test_a_uuid_object_labels_the_same_as_its_string(sent, tasks):
+    """Flow.id is a UUID, not a str, so the label must not depend on which."""
+    import uuid
+
+    _run(tasks, id=uuid.UUID(FLOW_ID))
+
+    assert sent["_label"] == f"AERO Analysis flow {FLOW_ID[:8]}"

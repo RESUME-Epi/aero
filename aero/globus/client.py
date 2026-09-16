@@ -107,6 +107,7 @@ class GlobusClient:
 
     def run_flow(
         self,
+        id,
         endpoint_uuid: str,
         function_uuid: str,
         pull_function_uuid: str,
@@ -118,6 +119,9 @@ class GlobusClient:
         source_data_id=None,
     ):
         """Run a user (analysis) flow.
+
+        ``id`` is the AERO flow's uuid, and goes into the run label so that runs
+        of different analyses can be told apart in the Globus run list.
 
         ``trigger_url``/``signed_url``, when given, are injected onto the one
         ``input_data`` entry matching ``source_data_id`` — the no-copy source whose
@@ -156,7 +160,7 @@ class GlobusClient:
         }
         response = self.specific_flow_clients[flow_id].run_flow(
             body=run_input,
-            label="AERO Demo | User flow",
+            label=f"AERO Analysis flow {str(id)[:8]}",
             run_managers=monitors,
         )
         assert response.http_status == 201
