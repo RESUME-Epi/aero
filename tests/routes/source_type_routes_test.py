@@ -104,6 +104,104 @@ def test_create_type_twice_conflicts(client):
 
 
 # --------------------------------------------------------------------------
+# removing a url
+# --------------------------------------------------------------------------
+
+
+def test_delete_url_leaves_the_type_and_its_other_urls(client, session):
+    body = _create_typed_source(client)
+    client.post(f"{TYPES}/traffic/urls", json={"url": URL_B})
+
+    resp = client.delete(f"{TYPES}/traffic/urls", params={"url": URL_A})
+    assert resp.status_code == 200, resp.text
+
+    out = resp.json()
+    assert out["data_id"] == body["id"]
+    assert [u["object_key"] for u in out["urls"]] == ["traffic/b.xml.gz"]
+
+
+def test_delete_url_normalizes_what_it_is_given(client):
+    """The caller should not have to reproduce the registered form exactly."""
+    _create_typed_source(client)
+
+    presigned = f"{URL_A}?X-Amz-Signature=abc&X-Amz-Expires=3600"
+    resp = client.delete(f"{TYPES}/traffic/urls", params={"url": presigned})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["urls"] == []
+
+
+def test_delete_url_belonging_to_another_type_conflicts(client):
+    _create_typed_source(client, name="traffic", url=URL_A)
+    _create_typed_source(client, name="other", url=URL_B)
+
+    resp = client.delete(f"{TYPES}/other/urls", params={"url": URL_A})
+    assert resp.status_code == 409, resp.text
+    assert "traffic" in resp.json()["detail"]
+
+    # and the url is still where it was
+    assert len(client.get(f"{TYPES}/traffic").json()["urls"]) == 1
+
+
+def test_delete_unregistered_url_404s(client):
+    _create_typed_source(client)
+    resp = client.delete(f"{TYPES}/traffic/urls", params={"url": URL_B})
+    assert resp.status_code == 404, resp.text
+
+
+def test_delete_url_from_unknown_type_404s(client):
+    resp = client.delete(f"{TYPES}/nope/urls", params={"url": URL_A})
+    assert resp.status_code == 404, resp.text
+
+
+def test_removing_the_last_url_makes_notify_unresolvable(client, session):
+    """Nothing is destroyed, but there is no longer any way in.
+
+    Resolution falls back to untyped sources only, so a type with no urls cannot
+    be reached even though its Data.url still holds the url it was created with.
+    """
+    body = _create_typed_source(client)
+    client.post(NOTIFY, json={"file_id": URL_A, "etag": "aaa", "size": 1})
+
+    resp = client.delete(f"{TYPES}/traffic/urls", params={"url": URL_A})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["urls"] == []
+
+    assert client.post(NOTIFY, json={"file_id": URL_A, "etag": "bbb"}).status_code == 404
+
+    d = session.exec(select(Data).where(Data.id == UUID(body["id"]))).first()
+    assert d.source_type is not None
+    assert d.url == URL_A
+    assert [v.source_key for v in d.versions] == ["traffic/a.xml.gz"]
+
+
+def test_a_removed_url_can_be_registered_again(client):
+    body = _create_typed_source(client)
+    client.delete(f"{TYPES}/traffic/urls", params={"url": URL_A})
+
+    resp = client.post(f"{TYPES}/traffic/urls", json={"url": URL_A})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data_id"] == body["id"]
+
+    ok = client.post(NOTIFY, json={"file_id": URL_A, "etag": "aaa", "size": 1})
+    assert ok.status_code == 200, ok.text
+
+
+def test_a_removed_url_is_free_for_another_type(client):
+    _create_typed_source(client, name="traffic", url=URL_A)
+    _create_typed_source(client, name="other", url=URL_B)
+
+    client.delete(f"{TYPES}/traffic/urls", params={"url": URL_A})
+
+    resp = client.post(f"{TYPES}/other/urls", json={"url": URL_A})
+    assert resp.status_code == 200, resp.text
+    assert sorted(u["object_key"] for u in resp.json()["urls"]) == [
+        "traffic/a.xml.gz",
+        "traffic/b.xml.gz",
+    ]
+
+
+# --------------------------------------------------------------------------
 # notify
 # --------------------------------------------------------------------------
 

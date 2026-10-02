@@ -88,6 +88,9 @@ version records the **concrete** object that changed, so change detection stays 
 matter which pattern matched it.
 
 `aero types` lists every type with its data id and whether each entry is an object or a pattern.
+`aero types <name> --remove-url <url>` detaches one of them again, leaving the type, its data id
+and its versions in place. A type with no urls left cannot be resolved by notify at all, so for a
+no-copy source that stops ingestion until a url is added back.
 
 ### Option C — Python
 ```python
