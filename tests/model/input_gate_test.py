@@ -7,6 +7,7 @@ run.
 
 from datetime import datetime
 from datetime import timedelta
+from datetime import timezone
 from uuid import uuid4
 
 import pytest
@@ -57,7 +58,7 @@ def no_globus_fixture(monkeypatch):
     monkeypatch.setattr(fm.GLOBUS_CLIENT, "run_flow", lambda **kw: None)
 
 
-NOW = datetime(2026, 8, 14, 12, 0, 0)
+NOW = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
 EARLIER = NOW - timedelta(hours=1)
 LATER = NOW + timedelta(hours=1)
 

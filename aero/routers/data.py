@@ -36,6 +36,7 @@ from aero.models.flows import TriggerEnum
 from aero.models.provenance import Provenance
 from aero.models.source_type import SourceType
 from aero.models.source_type import SourceUrl
+from aero.models.types import utcnow
 
 from aero import GLOBUS_CLIENT
 
@@ -865,7 +866,7 @@ def _run_event_ingestion(
             format=suffix,
             checksum=checksum,
             size=resolved_size,
-            created_at=datetime.now(),
+            created_at=utcnow(),
             source_key=object_key,
             dedup=dedup,
         )

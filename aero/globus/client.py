@@ -218,7 +218,9 @@ class GlobusClient:
             name=name,
             schedule=RecurringTimerSchedule(
                 interval_seconds=interval_in_sec,
-                start=datetime.datetime.now(),
+                # Aware, so Globus is told an instant rather than a wall clock
+                # it has to guess a zone for.
+                start=datetime.datetime.now(datetime.timezone.utc),
             ),
             body={"body": run_input},
         )

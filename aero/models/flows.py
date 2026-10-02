@@ -7,7 +7,6 @@ from uuid import uuid4
 from typing import TYPE_CHECKING
 from typing import Optional
 
-from sqlalchemy import DateTime
 from sqlmodel import Column
 from sqlmodel import Field
 from sqlmodel import JSON
@@ -20,6 +19,8 @@ from aero.models.error import FLOW_TIMER_ERROR
 from aero.models.error import ServiceError
 from aero.globus.utils import FlowEnum
 from aero.models.function import Function
+from aero.models.types import UTCDateTime
+from aero.models.types import utcnow
 
 
 logger = logging.getLogger(__name__)
@@ -74,14 +75,10 @@ class Flow(SQLModel, table=True):
     timer: int | None = Field(default=None)  # Column(Integer)
     timer_job_id: UUID | None = Field(default=None)  # Column(String)
     policy: int = Field(nullable=False)  # Column(Integer)
-    # sa_type is spelled out because sqlmodel infers a *timezone-aware* column
-    # from a bare `datetime` and then rejects the naive values every timestamp in
-    # this schema is written with. A plain DateTime keeps the column `timestamp
-    # without time zone`, so stored rows go on meaning what they already mean --
-    # the server's local clock -- rather than being relabelled as UTC on read.
-    # The ANY/ALL rerun gate compares this against DataVersion.created_at
-    # directly, so the two have to be stored and read the same way.
-    last_executed: datetime | None = Field(default=None, sa_type=DateTime)
+    # Aware UTC, compared against DataVersion.created_at by the ANY/ALL rerun
+    # gate. sa_type is spelled out rather than inferred because only some
+    # sqlmodel releases read a bare `datetime` as timezone-aware.
+    last_executed: datetime | None = Field(default=None, sa_type=UTCDateTime)
     user_endpoint: UUID | None = Field(default=None)  # Column(String)
     arg_hash: str | None = Field(default=None)  # Column(String)
     derived_from: list["Data"] = Relationship(link_model=FlowDerivation)
@@ -155,7 +152,7 @@ class Flow(SQLModel, table=True):
             source_key=source_key,
             dedup=dedup,
         )
-        self.last_executed = datetime.now()
+        self.last_executed = utcnow()
         session.add(self)
         session.commit()
         session.refresh(self)
@@ -213,7 +210,7 @@ class Flow(SQLModel, table=True):
             return self.policy
         elif self.policy == TriggerEnum.TIMER:
             self._start_timer_flow(session=session)
-            self.last_executed = datetime.now()
+            self.last_executed = utcnow()
         elif self.policy in (TriggerEnum.ANY_INPUT, TriggerEnum.ALL_INPUT):
             logger.debug(
                 "flow %s: policy=%s last_executed=%s at_registration=%s inputs=%s",
@@ -253,7 +250,7 @@ class Flow(SQLModel, table=True):
                     signed_url=signed_url,
                     source_data_id=source_data_id,
                 )
-                self.last_executed = datetime.now()
+                self.last_executed = utcnow()
             else:
                 # The usual cause of "the analysis didn't run": every input's
                 # newest version predates last_executed.
