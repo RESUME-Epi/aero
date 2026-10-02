@@ -17,10 +17,12 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from typing import Optional
 
-from sqlalchemy import DateTime
 from sqlmodel import Field
 from sqlmodel import Relationship
 from sqlmodel import SQLModel
+
+from aero.models.types import UTCDateTime
+from aero.models.types import utcnow
 
 
 if TYPE_CHECKING:  # pragma: nocover
@@ -33,7 +35,7 @@ class SourceType(SQLModel, table=True):
     id: UUID = Field(default_factory=uuid4, index=True, primary_key=True)
     name: str = Field(index=True, unique=True)
     data_id: UUID = Field(foreign_key="data.id", unique=True)
-    created_at: datetime = Field(default_factory=datetime.now, sa_type=DateTime)
+    created_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
 
     data: Optional["Data"] = Relationship(back_populates="source_type")
     urls: list["SourceUrl"] = Relationship(
@@ -50,6 +52,6 @@ class SourceUrl(SQLModel, table=True):
     url: str = Field(nullable=False)
     # _normalize_object_key(url): scheme/host/query stripped. The match + dedup key.
     object_key: str = Field(index=True, unique=True)
-    created_at: datetime = Field(default_factory=datetime.now, sa_type=DateTime)
+    created_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
 
     type: Optional["SourceType"] = Relationship(back_populates="urls")

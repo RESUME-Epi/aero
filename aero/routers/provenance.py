@@ -18,6 +18,7 @@ from aero.database import get_session
 from aero.models.data import Data
 from aero.models.data_version import DataVersion
 from aero.models.provenance import Provenance
+from aero.models.types import utcnow
 
 
 router = APIRouter(
@@ -67,15 +68,14 @@ def add_record(pr: ProvRecord, session: Session = Depends(get_session)):
         # create new versions for output data
         #
         # Stamp created_at on the server rather than trusting the worker's
-        # value: the worker sends datetime.now().ctime() in its *local*
-        # timezone (naive, second-truncated), while Flow.last_executed is the
-        # server's datetime.now(). The ANY/ALL rerun gate compares
-        # version.created_at > flow.last_executed as naive datetimes, so a
-        # worker/server timezone gap (e.g. EDT worker vs UTC server) makes
-        # every new version look hours older than last_executed and the flow
-        # never reruns. Using one clock (the server's) for both keeps the
-        # comparison correct regardless of where the worker runs.
-        committed_at = datetime.now()
+        # value: the worker sends datetime.now().ctime(), which is its *local*
+        # wall clock with no offset and no way to recover one. Taking it would
+        # make a version from an EDT worker look hours older than the UTC
+        # instant in Flow.last_executed, and the ANY/ALL rerun gate -- which
+        # compares version.created_at > flow.last_executed -- would never fire
+        # again. One clock for both keeps the comparison right wherever the
+        # worker runs.
+        committed_at = utcnow()
         output_versions = []
         for o in pr.output_data.values():
             d = session.exec(select(Data).where(Data.id == UUID(o["id"]))).first()
