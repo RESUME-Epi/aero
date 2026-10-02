@@ -223,6 +223,63 @@ def add_source_type_url(
     return _type_out(st)
 
 
+@router.delete("/types/{name}/urls", response_model=SourceTypeOut)
+def delete_source_type_url(
+    name: str, url: str, session: Session = Depends(get_session)
+):
+    """Remove one URL from a type, leaving the type and its Data in place.
+
+    The url is normalized the way registration normalizes it, then — if that finds
+    nothing — the way a notify identity is normalized, so a presigned url pasted
+    out of a log resolves too. The two differ on ``?``: a registered key may be a
+    glob, where a notify identity's ``?`` always starts a query string.
+
+    Only the matching rule goes: the type, its Data UUID, its version history and
+    every flow registered against it are untouched, and the key is free for another
+    type to claim.
+
+    A type left with no urls is unreachable by notify — resolution falls back to
+    untyped sources only — so for a no-copy source that is the end of ingestion
+    until a url is added back.
+    """
+    st = session.exec(select(SourceType).where(SourceType.name == name)).first()
+    if st is None:
+        raise HTTPException(status_code=404, detail=f"Source type '{name}' not found.")
+
+    object_key = _normalize_registered_key(url)
+    su = session.exec(
+        select(SourceUrl).where(SourceUrl.object_key == object_key)
+    ).first()
+
+    if su is None:
+        concrete = _normalize_object_key(url)
+        if concrete != object_key:
+            su = session.exec(
+                select(SourceUrl).where(SourceUrl.object_key == concrete)
+            ).first()
+            if su is not None:
+                object_key = concrete
+
+    if su is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Object key '{object_key}' is not registered to any type.",
+        )
+    if su.type_id != st.id:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Object key '{object_key}' belongs to type '{su.type.name}', "
+                f"not '{name}'."
+            ),
+        )
+
+    session.delete(su)
+    session.commit()
+    session.refresh(st)
+    return _type_out(st)
+
+
 @router.post("/source", response_model=Data)
 def create_source(payload: SourceIn, session: Session = Depends(get_session)):
     """Create a source ``Data`` with no flow attached.
