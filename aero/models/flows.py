@@ -7,6 +7,7 @@ from uuid import uuid4
 from typing import TYPE_CHECKING
 from typing import Optional
 
+from sqlalchemy import DateTime
 from sqlmodel import Column
 from sqlmodel import Field
 from sqlmodel import JSON
@@ -73,7 +74,14 @@ class Flow(SQLModel, table=True):
     timer: int | None = Field(default=None)  # Column(Integer)
     timer_job_id: UUID | None = Field(default=None)  # Column(String)
     policy: int = Field(nullable=False)  # Column(Integer)
-    last_executed: datetime | None = Field(default=None)  # Column(DateTime)
+    # sa_type is spelled out because sqlmodel infers a *timezone-aware* column
+    # from a bare `datetime` and then rejects the naive values every timestamp in
+    # this schema is written with. A plain DateTime keeps the column `timestamp
+    # without time zone`, so stored rows go on meaning what they already mean --
+    # the server's local clock -- rather than being relabelled as UTC on read.
+    # The ANY/ALL rerun gate compares this against DataVersion.created_at
+    # directly, so the two have to be stored and read the same way.
+    last_executed: datetime | None = Field(default=None, sa_type=DateTime)
     user_endpoint: UUID | None = Field(default=None)  # Column(String)
     arg_hash: str | None = Field(default=None)  # Column(String)
     derived_from: list["Data"] = Relationship(link_model=FlowDerivation)
