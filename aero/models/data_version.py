@@ -4,6 +4,7 @@ from uuid import uuid4
 from typing import TYPE_CHECKING
 from typing import Optional
 
+from sqlalchemy import DateTime
 from sqlmodel import Field
 from sqlmodel import Relationship
 from sqlmodel import Session
@@ -23,7 +24,10 @@ class DataVersion(SQLModel, table=True):
     id: UUID = Field(default_factory=uuid4, index=True, primary_key=True, unique=True)
     version: int | None = Field(default=None, index=True)
     checksum: str | None = Field(default=None)
-    created_at: datetime = Field(default_factory=datetime.now)
+    # Naive, in the server's local time -- see the note on sa_type in
+    # aero.models.flows. The ANY/ALL rerun gate compares this against
+    # Flow.last_executed, so the two must be stamped from the same clock.
+    created_at: datetime = Field(default_factory=datetime.now, sa_type=DateTime)
     # Normalized object key this version came from. NULL for versions that predate
     # typed sources, which keeps their dedup on the old tail-comparison path.
     source_key: str | None = Field(default=None, index=True)
