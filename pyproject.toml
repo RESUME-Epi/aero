@@ -17,7 +17,14 @@ dependencies = [
     "globus_sdk>=4,<5",
     "globus-cli",
     "fastapi[standard]==0.115.8",
-    "sqlmodel"
+    # Exact: sqlmodel decides what a `datetime` annotation compiles to, and that
+    # changed under us between two image builds -- 0.0.4x began mapping a bare
+    # `datetime` to a timezone-aware column that rejects naive values, which took
+    # registration down until the schema was migrated. The models now name their
+    # column types explicitly (aero.models.types.UTCDateTime), so that particular
+    # drift cannot recur, but the rest of the schema is still inferred. Move this
+    # deliberately, with the tests run against the new version first.
+    "sqlmodel==0.0.47"
 ]
 
 [project.optional-dependencies]
