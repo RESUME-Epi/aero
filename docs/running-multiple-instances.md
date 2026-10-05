@@ -91,10 +91,15 @@ Add more instances by copying an env file (new `WEB_ALIAS`, `ADMINER_ALIAS`, `DB
 
 ## Reaching each instance
 
-- `http://aero.cels.anl.gov/aero1/docs`   (and `/aero1/adminer/` for its DB)
-- `http://aero.cels.anl.gov/aero2/docs`   (and `/aero2/adminer/` for its DB)
+- `https://aero.cels.anl.gov/aero1/docs`   (and `/aero1/adminer/` for its DB)
+- `https://aero.cels.anl.gov/aero2/docs`   (and `/aero2/adminer/` for its DB)
 
-(Use `https://` once TLS is enabled — see below. Always include adminer's trailing slash.)
+(Always include adminer's trailing slash.) Port 80 only redirects to 443, so plain `http://`
+costs an extra round trip and — for anything sending a token — puts it on the wire in clear
+before the redirect is seen. Configure clients with `https://`.
+
+`aero1`/`aero2` are placeholders in this document. The live front door serves `/osprey-proto`,
+`/fhwa` and `/hurricane`.
 
 ## nginx routing detail
 
@@ -114,11 +119,43 @@ The upstream is a **variable** with a `resolver`, so nginx starts even if a back
 down (it 502s at request time instead of failing to load — and avoids the "host not found
 in upstream" startup crash).
 
-## Enabling TLS
+## TLS
 
-`aero-app.conf` has a commented `listen 443 ssl;` block. Uncomment it and the
-`ssl_certificate` / `ssl_certificate_key` lines; the front-door nginx already mounts
-`/etc/pki/tls/certs` → `/certs` and `/etc/pki/tls/private` → `/keys`.
+The front door terminates TLS and port 80 does nothing but `return 308` to the https URL. Compose
+mounts the host's `/etc/pki/tls/certs` → `/certs` and `/etc/pki/tls/private` → `/keys` read-only,
+and `aero-app.conf` serves the InCommon bundle from there.
+
+Two parts have to agree, and only one of them is nginx:
+
+- **nginx** holds `listen 443 ssl` plus `http2 on` (a separate directive since nginx 1.25) and the
+  `ssl_certificate` / `ssl_certificate_key` pair. `ssl_certificate` must be the **bundle**, not the
+  bare leaf, or clients without the intermediate cached cannot build a chain.
+- **Each instance's uvicorn** needs `FORWARDED_ALLOW_IPS` (set in `docker-compose.yml`). uvicorn
+  enables `--proxy-headers` by default but trusts `X-Forwarded-Proto` only from `127.0.0.1`, and
+  nginx is a different container. Without it FastAPI believes every request is http and emits
+  `http://` redirects from https requests — which is easy to miss, because the pages still load.
+
+After changing the conf, test before reloading — a wrong cert path stops nginx from starting, and
+on the front door that is every instance at once:
+
+```bash
+docker compose exec nginx nginx -t        # parse + check paths
+docker compose exec nginx nginx -s reload
+```
+
+The certificate is institutional, so there is no ACME renewal: expiry is a manual event, and a
+replaced cert needs the same `nginx -s reload` to be picked up. To check what is being served:
+
+```bash
+openssl s_client -connect aero.cels.anl.gov:443 -servername aero.cels.anl.gov -brief </dev/null
+curl -sSI https://aero.cels.anl.gov/fhwa/data | grep -i ^location   # must not say http://
+```
+
+That second command is the one that catches a missing `FORWARDED_ALLOW_IPS`.
+
+HSTS is deliberately not set. `Strict-Transport-Security` applies to the whole hostname, so once a
+browser caches it nothing on `aero.cels.anl.gov` is reachable over http until `max-age` expires.
+Worth adding at a short `max-age` once TLS has been stable, not on day one.
 
 ## Application-level isolation caveat
 
