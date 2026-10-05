@@ -113,10 +113,22 @@ next to an explicit `derived_from=` raises "multiple values for keyword argument
 returns the new `DataVersion` or `None` on dedup; `_run_flow` takes an explicit `at_registration`
 flag rather than inferring it from `last_executed is None`. Keep signals explicit.
 
-**Datetimes are naive and compared across components.** The ANY/ALL rerun gate compares
-`version.created_at > flow.last_executed`. Both must be stamped from the *server's* clock — a
-worker in a different timezone silently stops flows from rerunning (see the comment in
-`aero/routers/provenance.py`).
+**Datetimes are aware UTC, and compared across components.** Every stored timestamp is an aware
+UTC instant — `UTCDateTime` in `aero/models/types.py`, with `utcnow()` to stamp them. Binding a
+naive value raises rather than being guessed at. Two things follow:
+
+- Columns name `sa_type=UTCDateTime` explicitly instead of letting sqlmodel infer from a bare
+  `datetime` annotation, because what that infers changes between releases. A new timestamp column
+  must do the same, and needs an entry in `_UTC_COLUMNS` in `aero/database.py` plus hand-written
+  DDL, like any other new column.
+- The ANY/ALL rerun gate compares `version.created_at > flow.last_executed`, so both are stamped
+  from the *server's* clock. The worker sends its own local `ctime()` and `aero/routers/provenance.py`
+  discards it — taking it would make versions look hours old and stop flows rerunning.
+
+**Dependencies come from `requirements.lock`.** The Dockerfile installs the lock and then the app
+with `--no-deps`, so `pyproject.toml`'s ranges declare intent but choose nothing. Editing
+`pyproject.toml` alone changes what the image installs not at all; the lock has to be regenerated
+from a rebuilt image. README's *Dependencies* section has the sequence.
 
 **Globus Search is best-effort.** Indexing needs an index plus the ingest role on it;
 `add_search_entry` logs and returns `None` on failure so ingestion continues, and
