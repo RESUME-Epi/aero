@@ -1,5 +1,17 @@
 FROM python:3.11
 WORKDIR /app
+
+# Dependencies come from the lock, not from pyproject.toml's ranges: an
+# unpinned rebuild once changed what sqlmodel compiles a `datetime` field to
+# and took registration down with no change to this repo. Installed before the
+# source so editing aero/ does not rebuild this layer.
+COPY requirements.lock requirements.lock
+RUN pip install --no-deps -r requirements.lock
+
 COPY . .
-RUN pip install -e .
+# --no-deps again: with it, the lock is the only thing choosing versions.
+# Without it pip re-reads pyproject.toml here and is free to upgrade whatever
+# the ranges there still permit.
+RUN pip install --no-deps -e .
+
 WORKDIR /app/aero

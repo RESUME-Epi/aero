@@ -89,6 +89,40 @@ mechanism. It creates tables that don't exist yet and never alters ones that do,
 The `aero/migrations/` directory is a non-functional remnant of an earlier Flask-Migrate setup —
 nothing runs it.
 
+### Dependencies
+
+`requirements.lock` is what the server image installs, pinned down to transitive dependencies.
+`pyproject.toml` still declares what the app depends on and is the file to read, but it does not
+decide versions: the Dockerfile installs the lock first and then the app itself with `--no-deps`,
+so nothing can re-resolve.
+
+This exists because an unpinned rebuild once changed which SQLModel version the image got, that
+version changed what a `datetime` field compiles to, and registration started failing on an insert
+that had worked for months — with no change to this repository.
+
+To add, remove or move a dependency:
+
+```bash
+# 1. edit pyproject.toml, then rebuild so the new set is actually resolved
+docker compose build web
+
+# 2. freeze what the rebuilt image got
+docker compose run --rm --no-deps web pip freeze --exclude-editable > requirements.lock
+
+# 3. run the tests against those versions before trusting them
+pip install -r requirements.lock      # in your venv
+pytest tests/
+
+# 4. commit pyproject.toml and requirements.lock together
+```
+
+Step 3 is the one worth not skipping: the lock's whole purpose is that version changes become
+deliberate, which only holds if something checks them. Note that CI runs Python 3.10 while the
+image is 3.11, so CI is not that check.
+
+The lock pins versions, not hashes, so it protects against drift rather than against a tampered
+package.
+
 ## Configuration
 
 All configuration is environment variables, read in `aero/config.py`.
