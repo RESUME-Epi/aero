@@ -91,10 +91,15 @@ Add more instances by copying an env file (new `WEB_ALIAS`, `ADMINER_ALIAS`, `DB
 
 ## Reaching each instance
 
-- `http://aero.cels.anl.gov/aero1/docs`   (and `/aero1/adminer/` for its DB)
-- `http://aero.cels.anl.gov/aero2/docs`   (and `/aero2/adminer/` for its DB)
+- `https://aero.cels.anl.gov/aero1/docs`   (and `/aero1/adminer/` for its DB)
+- `https://aero.cels.anl.gov/aero2/docs`   (and `/aero2/adminer/` for its DB)
 
-(Use `https://` once TLS is enabled — see below. Always include adminer's trailing slash.)
+(Always include adminer's trailing slash.) Configure clients with `https://` — the front end
+described under [TLS](#tls) is what serves it, and it sends HSTS, so a browser will not use
+`http://` for this hostname anyway.
+
+`aero1`/`aero2` are placeholders in this document. The live front door serves `/osprey-proto`,
+`/fhwa` and `/hurricane`.
 
 ## nginx routing detail
 
@@ -114,11 +119,67 @@ The upstream is a **variable** with a `resolver`, so nginx starts even if a back
 down (it 502s at request time instead of failing to load — and avoids the "host not found
 in upstream" startup crash).
 
-## Enabling TLS
+## TLS
 
-`aero-app.conf` has a commented `listen 443 ssl;` block. Uncomment it and the
-`ssl_certificate` / `ssl_certificate_key` lines; the front-door nginx already mounts
-`/etc/pki/tls/certs` → `/certs` and `/etc/pki/tls/private` → `/keys`.
+**TLS is not terminated on this host.** A CELS front end terminates it and forwards to epivm over
+plain http on port 80. It is also what sets `Strict-Transport-Security`. So nginx here listens on
+80 only, mounts no certificate or key, and publishes no 443.
+
+That is easy to get wrong in a specific and expensive way. Adding `listen 443 ssl` plus a
+`return 308 https://...` on port 80 looks like the standard recipe, and it takes down all three
+instances at once: `$scheme` is `http` for a request the client made over https, so nginx
+redirects the client back to the front end, which forwards it here again, and the browser stops
+with `ERR_TOO_MANY_REDIRECTS`. The symptom of having made this mistake:
+
+```bash
+curl -sS -o /dev/null -D - https://aero.cels.anl.gov/fhwa/docs
+# HTTP/2 308
+# location: https://aero.cels.anl.gov/fhwa/docs     <- the URL that was just requested
+```
+
+Two consequences for the config, neither optional:
+
+- **nginx forwards `$client_scheme`, not `$scheme`.** `$scheme` is the scheme *this* nginx was
+  reached on, which is `http` for everything. The front end does not send `X-Forwarded-Proto`
+  either, so there is nothing to read and the answer comes from the topology — the front end is
+  the only route in and it is https-only:
+
+  ```nginx
+  map $http_x_forwarded_proto $client_scheme {
+      ''      https;
+      default $http_x_forwarded_proto;
+  }
+  ```
+
+  If a second way in ever appears, or CELS starts sending the header, this is the line to
+  revisit.
+
+- **Each instance's uvicorn needs `FORWARDED_ALLOW_IPS`** (set in `docker-compose.yml`). uvicorn
+  enables `--proxy-headers` by default but trusts `X-Forwarded-Proto` only from `127.0.0.1`, and
+  nginx is a different container. Without it FastAPI believes every request is http and emits
+  `http://` redirects from https requests — easy to miss, because the pages still load.
+
+Note that `/etc/pki/tls/certs/cels-incommon.anl.gov-bundle.pem` on epivm expired in August 2025.
+Nothing uses it; it is mentioned only so that finding it does not suggest this host is supposed to
+be serving TLS.
+
+Test before reloading — a config error stops nginx from starting, and on the front door that is
+every instance at once:
+
+```bash
+docker compose exec nginx nginx -t        # parse
+docker compose exec nginx nginx -s reload
+docker compose up -d web                  # per instance, for FORWARDED_ALLOW_IPS
+```
+
+Then check that the scheme survives the two hops:
+
+```bash
+curl -sS -o /dev/null -D - https://aero.cels.anl.gov/fhwa/docs      # 200, not a 308 to itself
+curl -sSI https://aero.cels.anl.gov/fhwa/data | grep -i ^location   # must not say http://
+```
+
+The second is what catches a missing `FORWARDED_ALLOW_IPS`.
 
 ## Application-level isolation caveat
 
