@@ -140,15 +140,19 @@ curl -sS -o /dev/null -D - https://aero.cels.anl.gov/fhwa/docs
 Two consequences for the config, neither optional:
 
 - **nginx forwards `$client_scheme`, not `$scheme`.** `$scheme` is the scheme *this* nginx was
-  reached on, which is `http` for everything. `$client_scheme` is a `map` over `X-Forwarded-Proto`
-  from the front end, falling back to `$scheme`:
+  reached on, which is `http` for everything. The front end does not send `X-Forwarded-Proto`
+  either, so there is nothing to read and the answer comes from the topology — the front end is
+  the only route in and it is https-only:
 
   ```nginx
   map $http_x_forwarded_proto $client_scheme {
-      ''      $scheme;
+      ''      https;
       default $http_x_forwarded_proto;
   }
   ```
+
+  If a second way in ever appears, or CELS starts sending the header, this is the line to
+  revisit.
 
 - **Each instance's uvicorn needs `FORWARDED_ALLOW_IPS`** (set in `docker-compose.yml`). uvicorn
   enables `--proxy-headers` by default but trusts `X-Forwarded-Proto` only from `127.0.0.1`, and
