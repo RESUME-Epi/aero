@@ -21,6 +21,13 @@ services:
       # false to run without Globus Search: indexing needs an index plus the ingest
       # role on it, and nothing but GET /data/search reads it.
       AERO_SEARCH_ENABLED: ${AERO_SEARCH_ENABLED:-true}
+      # TLS is terminated by a CELS front end, which forwards to nginx, which
+      # forwards here -- so X-Forwarded-Proto arrives from a non-loopback
+      # address. uvicorn trusts only 127.0.0.1 by default and would drop it,
+      # leaving FastAPI to answer an https request with http:// redirects.
+      # `web` publishes no ports -- it is reachable only from the compose
+      # networks -- so trusting any peer is bounded.
+      FORWARDED_ALLOW_IPS: "*"
 
     # expose:
     #  - 8081
@@ -46,13 +53,13 @@ services:
 
   nginx:
     image: nginx
+    # Port 80 only. TLS is terminated by a CELS front end which forwards here in
+    # the clear, so there is nothing to serve on 443 and no certificate or key
+    # to mount -- see the header of nginx/aero-app.conf before adding either.
     ports:
       - "80:80"
-      - "443:443"
 
     volumes:
-      - /etc/pki/tls/private:/keys
-      - /etc/pki/tls/certs:/certs
       - ${AERO_APP_CONF:-./nginx/aero-app.conf}:/etc/nginx/conf.d/default.conf
 
     depends_on:
