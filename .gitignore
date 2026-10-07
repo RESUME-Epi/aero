@@ -37,3 +37,5 @@ test_client/
 workflow/send-email-test
 
 *~
+env/
+obsolete/
