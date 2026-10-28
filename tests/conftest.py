@@ -40,6 +40,10 @@ def _mock_globus(monkeypatch):
     def get_auth_identity(usernames):
         return {"identities": [{"id": "myid"}]}
 
+    class MockGlobusClient:
+        def __init__(self, search_idx):
+            pass
+
     class MockSpecificFlowClient:
         def run_flow(*args, **kwargs):
             @dataclass
@@ -67,6 +71,7 @@ def _mock_globus(monkeypatch):
 
             return Response()
 
+    monkeypatch.setattr(client.GlobusClient, "__init__", MockGlobusClient.__init__)
     monkeypatch.setattr(
         client.SearchClient,
         "create_index",
