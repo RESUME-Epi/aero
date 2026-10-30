@@ -1,5 +1,6 @@
 import logging
 
+from dataclasses import dataclass
 from datetime import datetime
 from enum import IntEnum
 from uuid import UUID
@@ -15,9 +16,12 @@ from sqlmodel import Session
 from sqlmodel import SQLModel
 
 from aero import GLOBUS_CLIENT
+from aero.config import Config
 from aero.models.error import FLOW_TIMER_ERROR
 from aero.models.error import ServiceError
+from aero.globus.health import endpoint_is_up
 from aero.globus.utils import FlowEnum
+from aero.models.failover import FlowFailover
 from aero.models.function import Function
 from aero.models.types import UTCDateTime
 from aero.models.types import utcnow
@@ -59,6 +63,23 @@ class FlowContribution(SQLModel, table=True):
     )
 
 
+@dataclass(frozen=True)
+class RunTarget:
+    """Where one run goes: an endpoint and the three functions to run on it.
+
+    Resolved per run and passed down to the submit call. It is never persisted —
+    the flow keeps naming its primary, so a failover run does not quietly become
+    the flow's new home.
+    """
+
+    endpoint: UUID | None
+    function_id: UUID | None
+    pull_function_id: UUID | None
+    commit_function_id: UUID | None
+    is_failover: bool = False
+    reason: str | None = None
+
+
 class Flow(SQLModel, table=True):
     __tablename__ = "flow"
     id: UUID = Field(
@@ -84,6 +105,84 @@ class Flow(SQLModel, table=True):
     derived_from: list["Data"] = Relationship(link_model=FlowDerivation)
     contributed_to: list["Data"] = Relationship(link_model=FlowContribution)
     function: Optional["Function"] = Relationship()
+    # delete-orphan because DELETE /data/{id}/flows does session.delete(flow),
+    # and FlowFailover.flow_id is a non-nullable FK that would otherwise block it
+    # -- the same way Provenance does, which that route has to delete by hand.
+    failovers: list["FlowFailover"] = Relationship(
+        back_populates="flow",
+        sa_relationship_kwargs={
+            "cascade": "all, delete-orphan",
+            "order_by": "FlowFailover.priority",
+        },
+    )
+
+    def _select_run_target(self) -> "RunTarget":
+        """Which endpoint and functions this run should go to.
+
+        The primary unless it reports offline and an enabled failover does not.
+        Checked fresh per run (behind the status cache) rather than stored, so
+        nothing here is written back to the flow.
+
+        A flow with no enabled failover rows short-circuits before any status
+        call: with nowhere to go, knowing the endpoint is down would change
+        nothing, and this runs inline in the notify webhook.
+        """
+        primary = RunTarget(
+            endpoint=self.user_endpoint,
+            function_id=self.function_id,
+            pull_function_id=self.pull_function_id,
+            commit_function_id=self.commit_function_id,
+        )
+
+        candidates = [f for f in self.failovers if f.enabled]
+        if not Config.FAILOVER_ENABLED or not candidates:
+            return primary
+
+        if endpoint_is_up(self.user_endpoint) is not False:
+            return primary
+
+        for failover in candidates:
+            if endpoint_is_up(failover.endpoint) is False:
+                continue
+
+            logger.warning(
+                "flow %s: endpoint %s is offline, failing over to %s (priority %s)",
+                self.id,
+                self.user_endpoint,
+                failover.endpoint,
+                failover.priority,
+            )
+            return RunTarget(
+                endpoint=failover.endpoint,
+                # An unset function on the failover row means "the same one":
+                # only an endpoint on a different Python minor version needs its
+                # functions re-registered under new uuids.
+                function_id=failover.function_id or self.function_id,
+                pull_function_id=failover.pull_function_id or self.pull_function_id,
+                commit_function_id=(
+                    failover.commit_function_id or self.commit_function_id
+                ),
+                is_failover=True,
+                reason=f"endpoint {self.user_endpoint} is offline",
+            )
+
+        # Submitting to a dead endpoint is still better than dropping the
+        # trigger: the run fails visibly in Globus and `aero run --force`
+        # recovers it, whereas a skipped run leaves nothing to find.
+        logger.warning(
+            "flow %s: endpoint %s and all %d failover(s) report offline -- "
+            "submitting to the primary anyway",
+            self.id,
+            self.user_endpoint,
+            len(candidates),
+        )
+        return RunTarget(
+            endpoint=primary.endpoint,
+            function_id=primary.function_id,
+            pull_function_id=primary.pull_function_id,
+            commit_function_id=primary.commit_function_id,
+            reason="the primary and every failover report offline",
+        )
 
     def _start_timer_flow(self, session: Session):
         self.timer_job_id = GLOBUS_CLIENT.set_timer(
@@ -140,14 +239,16 @@ class Flow(SQLModel, table=True):
         ``add_new_version`` via the worker's ``/prov/new`` post so that a typed
         source dedups per url on the copy path too.
         """
+        target = self._select_run_target()
+
         GLOBUS_CLIENT.run_ingestion_flow(
             self.id,
             self.email,
-            user_function=self.function_id,
-            pull_function_uuid=self.pull_function_id,
-            commit_function_uuid=self.commit_function_id,
+            user_function=target.function_id,
+            pull_function_uuid=target.pull_function_id,
+            commit_function_uuid=target.commit_function_id,
             function_args=self.function_args,
-            user_endpoint=self.user_endpoint,
+            user_endpoint=target.endpoint,
             source_url=source_url,
             source_key=source_key,
             dedup=dedup,
@@ -233,6 +334,7 @@ class Flow(SQLModel, table=True):
         source_data_id: UUID | None = None,
         at_registration: bool = False,
         force: bool = False,
+        target: "RunTarget | None" = None,
     ) -> int:
         # try:
         function_args = self.function_args
@@ -275,20 +377,29 @@ class Flow(SQLModel, table=True):
 
             submit, reason = self._input_run_decision(force=force)
             if submit:
+                # Passed in by POST /flow/{id}/run, which resolves it first so
+                # the response can name where the run went. Selecting again here
+                # would re-log the failover and, with caching off, re-ask Globus.
+                target = target or self._select_run_target()
                 logger.info(
-                    "flow %s: inputs ready, submitting run (force=%s)", self.id, force
+                    "flow %s: inputs ready, submitting run to %s%s (force=%s)",
+                    self.id,
+                    target.endpoint,
+                    " [failover]" if target.is_failover else "",
+                    force,
                 )
                 GLOBUS_CLIENT.run_flow(
                     id=self.id,
-                    endpoint_uuid=self.user_endpoint,
-                    function_uuid=self.function_id,
-                    pull_function_uuid=self.pull_function_id,
-                    commit_function_uuid=self.commit_function_id,
+                    endpoint_uuid=target.endpoint,
+                    function_uuid=target.function_id,
+                    pull_function_uuid=target.pull_function_id,
+                    commit_function_uuid=target.commit_function_id,
                     tasks=function_args,
                     email=self.email,
                     trigger_url=trigger_url,
                     signed_url=signed_url,
                     source_data_id=source_data_id,
+                    primary_endpoint=self.user_endpoint,
                 )
                 # Stamped on submission, not on success. A run that fails still
                 # moves last_executed forward, so every version that existed
@@ -323,6 +434,7 @@ def create_flow(
     timer: int | None = None,
     policy: TriggerEnum = TriggerEnum.NONE,
     email: str | None = None,
+    failovers: list["FlowFailover"] | None = None,
 ):
     if policy == TriggerEnum.INGESTION and timer is None:
         timer = 86400
@@ -367,6 +479,9 @@ def create_flow(
         user_endpoint=endpoint,
         arg_hash=arg_hash,
         email=email,
+        # Attached before the commit below, so the registration-time run already
+        # has somewhere to fail over to.
+        failovers=failovers or [],
     )
 
     session.add(f)

@@ -47,8 +47,16 @@ def tasks_fixture():
         "kwargs": {
             "aero": {
                 "input_data": {
-                    "report": {"id": SRC, "version": None, "collection_url": "https://c/"},
-                    "other": {"id": OTHER, "version": None, "collection_url": "https://c/"},
+                    "report": {
+                        "id": SRC,
+                        "version": None,
+                        "collection_url": "https://c/",
+                    },
+                    "other": {
+                        "id": OTHER,
+                        "version": None,
+                        "collection_url": "https://c/",
+                    },
                 }
             }
         },
@@ -124,3 +132,103 @@ def test_a_uuid_object_labels_the_same_as_its_string(sent, tasks):
     _run(tasks, id=uuid.UUID(FLOW_ID))
 
     assert sent["_label"] == f"AERO Analysis flow {FLOW_ID[:8]}"
+
+
+# --- failover: repointing a run at a different endpoint ---------------------
+
+BACKUP = "22222222-2222-2222-2222-222222222222"
+
+
+def _failover_run(tasks, **extra):
+    """A run whose selected endpoint differs from the flow's registered one."""
+    extra.setdefault("id", FLOW_ID)
+    GLOBUS_CLIENT.run_flow(
+        endpoint_uuid=BACKUP,
+        function_uuid="f2",
+        pull_function_uuid="p2",
+        commit_function_uuid="c2",
+        tasks=tasks,
+        email=None,
+        primary_endpoint="e",
+        **extra,
+    )
+
+
+def test_failover_moves_the_task_dicts_too(sent, tasks):
+    """Regression: a failover run used to execute on the dead endpoint anyway.
+
+    The user flow reads the endpoint twice. `run_input["endpoint"]` drives
+    getVersions and updateMetadata, but the execute state dispatches on
+    `$.VersionResult.details.result[0]` — the task dicts, which get_versions
+    returns unchanged and which carry their own "endpoint"/"function" baked in
+    by create_flow. Rewriting only the run input moved the pull and the commit
+    while leaving the analysis itself pointed at the endpoint that was down.
+    """
+    _failover_run(tasks)
+
+    assert sent["endpoint"] == BACKUP
+    assert sent["version_function"] == "p2"
+    assert sent["commit_function"] == "c2"
+    assert sent["tasks"][0]["endpoint"] == BACKUP
+    assert sent["tasks"][0]["function"] == "f2"
+
+
+def test_failover_does_not_persist_onto_function_args(sent, tasks):
+    """The flow keeps naming its primary; only this run moves."""
+    before = json.dumps(tasks, sort_keys=True)
+
+    _failover_run(tasks)
+
+    assert json.dumps(tasks, sort_keys=True) == before
+
+
+def test_no_rewrite_when_the_primary_is_the_target(sent, tasks):
+    """The ordinary path: selection returned the primary, nothing to repoint."""
+    _run(tasks, primary_endpoint="e")
+
+    assert sent["tasks"][0]["endpoint"] == "e"
+    assert sent["tasks"][0]["function"] == "f"
+
+
+def test_a_task_on_another_endpoint_is_left_alone(sent, tasks):
+    """Only tasks pointed at the primary move.
+
+    A task naming some other endpoint was put there deliberately, and this
+    failover knows nothing about whether that one is healthy.
+    """
+    other_task = {"kwargs": {"aero": {}}, "function": "fx", "endpoint": "elsewhere"}
+
+    _failover_run([tasks, other_task])
+
+    assert sent["tasks"][0]["endpoint"] == BACKUP
+    assert sent["tasks"][1]["endpoint"] == "elsewhere"
+    assert sent["tasks"][1]["function"] == "fx"
+
+
+def test_failover_and_url_injection_compose(sent, tasks):
+    """A notify-triggered no-copy run that also has to fail over gets both."""
+    _failover_run(tasks, trigger_url=TRIGGER, signed_url=SIGNED, source_data_id=SRC)
+
+    assert sent["tasks"][0]["endpoint"] == BACKUP
+    report = sent["tasks"][0]["kwargs"]["aero"]["input_data"]["report"]
+    assert report["signed_url"] == SIGNED
+
+
+def test_without_a_primary_nothing_is_repointed(sent, tasks):
+    """`primary_endpoint` is what says "this is a failover".
+
+    Callers that do not pass it — the ingestion path, and anything older — must
+    keep the behavior they had.
+    """
+    GLOBUS_CLIENT.run_flow(
+        id=FLOW_ID,
+        endpoint_uuid=BACKUP,
+        function_uuid="f2",
+        pull_function_uuid="p2",
+        commit_function_uuid="c2",
+        tasks=tasks,
+        email=None,
+    )
+
+    assert sent["endpoint"] == BACKUP
+    assert sent["tasks"][0]["endpoint"] == "e"

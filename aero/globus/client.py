@@ -117,6 +117,7 @@ class GlobusClient:
         trigger_url: str | None = None,
         signed_url: str | None = None,
         source_data_id=None,
+        primary_endpoint=None,
     ):
         """Run a user (analysis) flow.
 
@@ -127,6 +128,11 @@ class GlobusClient:
         ``input_data`` entry matching ``source_data_id`` — the no-copy source whose
         change triggered this run. They go into a deep copy of the tasks so the
         transient signed url is never written back to ``Flow.function_args``.
+
+        ``primary_endpoint`` is the endpoint the flow is registered against. When
+        ``endpoint_uuid`` differs from it the run is failing over, and each task
+        still naming the primary is repointed — see the comment below for why
+        that is not redundant with ``run_input["endpoint"]``.
         """
         flow_id = FLOW_IDS[FlowEnum.USER_FLOW]
 
@@ -135,17 +141,47 @@ class GlobusClient:
         if isinstance(tasks, dict):
             tasks = [tasks]
 
-        if trigger_url and source_data_id is not None:
+        inject_urls = bool(trigger_url) and source_data_id is not None
+        # The user flow reads the endpoint twice. `run_input["endpoint"]` drives
+        # the getVersions and updateMetadata states, but the execute state
+        # dispatches on `$.VersionResult.details.result[0]` -- the task dicts,
+        # which get_versions returns unchanged and which carry their own
+        # "endpoint" and "function" from create_flow. Repointing only the run
+        # input would move the pull and the commit while leaving the analysis
+        # itself on the dead endpoint.
+        failing_over = (
+            primary_endpoint is not None
+            and endpoint_uuid is not None
+            and str(primary_endpoint) != str(endpoint_uuid)
+        )
+
+        if inject_urls or failing_over:
+            # One copy for both rewrites. Per-run values never go back to
+            # Flow.function_args: a transient signed url would outlive the
+            # signature that made it valid, and a failover endpoint would
+            # silently become the flow's registered home.
             tasks = copy.deepcopy(tasks)
+
+        if inject_urls:
             for task in tasks:
-                input_data = task.get("kwargs", {}).get("aero", {}).get(
-                    "input_data", {}
+                input_data = (
+                    task.get("kwargs", {}).get("aero", {}).get("input_data", {})
                 )
                 for entry in input_data.values():
                     if entry.get("id") == str(source_data_id):
                         entry["trigger_url"] = trigger_url
                         if signed_url:
                             entry["signed_url"] = signed_url
+
+        if failing_over:
+            for task in tasks:
+                # Only tasks pointed at the primary move. A task naming some
+                # other endpoint was put there deliberately and is not ours to
+                # redirect.
+                if task.get("endpoint") != str(primary_endpoint):
+                    continue
+                task["endpoint"] = str(endpoint_uuid)
+                task["function"] = str(function_uuid)
 
         if email is not None:
             user_uuid = self.get_user_uuid(usernames=email)

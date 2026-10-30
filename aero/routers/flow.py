@@ -21,6 +21,8 @@ from typing import Optional
 from aero.auth import require_globus_auth
 from aero.database import get_session
 
+from aero.globus.health import endpoint_is_up
+from aero.models.failover import FlowFailover
 from aero.models.flows import create_flow
 from aero.models.flows import Flow
 from aero.models.flows import TriggerEnum
@@ -37,6 +39,38 @@ router = APIRouter(
 )
 
 
+class FailoverIn(BaseModel):
+    endpoint: uuid.UUID
+    priority: int = Field(default=0)
+    # Omit to reuse the flow's own. Set them when the failover endpoint runs a
+    # different Python minor version and the functions had to be re-registered.
+    function_uuid: uuid.UUID | None = Field(default=None)
+    pull_function_uuid: uuid.UUID | None = Field(default=None)
+    commit_function_uuid: uuid.UUID | None = Field(default=None)
+    enabled: bool = Field(default=True)
+
+
+class FailoverOut(BaseModel):
+    id: uuid.UUID
+    flow_id: uuid.UUID
+    priority: int
+    endpoint: uuid.UUID
+    function_id: uuid.UUID | None = Field(default=None)
+    pull_function_id: uuid.UUID | None = Field(default=None)
+    commit_function_id: uuid.UUID | None = Field(default=None)
+    enabled: bool
+
+
+class EndpointStatusOut(BaseModel):
+    endpoint: uuid.UUID
+    role: str  # "primary" or "failover"
+    priority: int | None = Field(default=None)
+    enabled: bool = Field(default=True)
+    # "online", "offline", or "unknown" -- unknown means the check could not
+    # answer, and is never a reason to fail over.
+    status: str
+
+
 class FlowIn(BaseModel):
     gc_endpoint: uuid.UUID
     pull_function_uuid: Optional[uuid.UUID]
@@ -50,6 +84,7 @@ class FlowIn(BaseModel):
     timer: int = Field(default=86400)
     email: str | None = Field(default=None)
     flow_kwargs: dict | list = Field(default={})
+    failover: list[FailoverIn] = Field(default=[])
 
 
 class FlowOut(BaseModel):
@@ -128,6 +163,11 @@ class FlowRunIn(BaseModel):
 class FlowRunOut(BaseModel):
     submitted: bool
     reason: str | None = Field(default=None)
+    # Where the run actually went. Nothing persists this -- AERO records no
+    # Globus run id -- so for a submitted run this response and the server log
+    # are the only places the failover decision is visible.
+    endpoint: uuid.UUID | None = Field(default=None)
+    failover: bool = Field(default=False)
     flow: FlowOut
 
 
@@ -177,20 +217,185 @@ def run_flow(
     # _run_flow re-evaluates it rather than taking it as an argument, and agrees:
     # the decision is pure over state that nothing here mutates in between.
     submitted, reason = f._input_run_decision(force=payload.force)
+    # Resolved here rather than left to _run_flow so the response can say which
+    # endpoint the run went to, and only when there is going to be a run: an
+    # endpoint status check for a flow that is about to skip is wasted.
+    target = f._select_run_target() if submitted else None
     f._run_flow(
         session=session,
         force=payload.force,
         trigger_url=payload.trigger_url,
         signed_url=payload.signed_url,
         source_data_id=payload.source_data_id,
+        target=target,
     )
-    return FlowRunOut(submitted=submitted, reason=reason, flow=_flow_out(f))
+    return FlowRunOut(
+        submitted=submitted,
+        reason=reason,
+        endpoint=target.endpoint if target else None,
+        failover=bool(target and target.is_failover),
+        flow=_flow_out(f),
+    )
+
+
+def _get_flow(session: Session, flow_id: uuid.UUID) -> Flow:
+    f = session.exec(select(Flow).where(Flow.id == flow_id)).first()
+    if f is None:
+        raise HTTPException(
+            status_code=404, detail=f"Flow with id {flow_id} was not found."
+        )
+    return f
+
+
+def _validate_failovers(entries: list[FailoverIn], primary: uuid.UUID) -> None:
+    """Reject a failover set that could not be resolved unambiguously.
+
+    Priorities order the chain, so a repeat leaves which endpoint is tried first
+    up to row order. A failover naming the primary is a no-op at best and, since
+    selection only reaches the chain once the primary reports offline, would
+    just resubmit to the endpoint that is down.
+    """
+    priorities = [entry.priority for entry in entries]
+    dupes = sorted({p for p in priorities if priorities.count(p) > 1})
+    if dupes:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Duplicate failover priorities: {dupes}. Each must be unique.",
+        )
+
+    if any(entry.endpoint == primary for entry in entries):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{primary} is the flow's primary endpoint; a failover to it "
+                "would be a no-op."
+            ),
+        )
+
+
+def _failover_row(flow_id: uuid.UUID | None, entry: FailoverIn) -> FlowFailover:
+    return FlowFailover(
+        flow_id=flow_id,
+        priority=entry.priority,
+        endpoint=entry.endpoint,
+        function_id=entry.function_uuid,
+        pull_function_id=entry.pull_function_uuid,
+        commit_function_id=entry.commit_function_uuid,
+        enabled=entry.enabled,
+    )
+
+
+@router.get("/{flow_id}/failover", response_model=list[FailoverOut])
+def list_failover(flow_id: uuid.UUID, session: Session = Depends(get_session)):
+    """The endpoints this flow falls back to, in the order they are tried."""
+    return _get_flow(session, flow_id).failovers
+
+
+@router.post("/{flow_id}/failover", response_model=FailoverOut)
+def add_failover(
+    flow_id: uuid.UUID,
+    payload: FailoverIn,
+    session: Session = Depends(get_session),
+):
+    """Add an endpoint for this flow to fall back to when its own is offline.
+
+    `priority` orders the chain and must be unique within the flow, so which
+    endpoint is tried first is never ambiguous.
+
+    Leave the three function uuids unset to reuse the flow's own. Set them when
+    the failover endpoint runs a different Python minor version: a function
+    registered against one will not deserialize on the other, so it has to be
+    re-registered there and gets a new uuid.
+    """
+    f = _get_flow(session, flow_id)
+    _validate_failovers([payload], f.user_endpoint)
+
+    clash = next((x for x in f.failovers if x.priority == payload.priority), None)
+    if clash is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Flow {flow_id} already has a failover at priority "
+                f"{payload.priority} (endpoint {clash.endpoint})."
+            ),
+        )
+
+    row = _failover_row(flow_id, payload)
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+
+    return row
+
+
+@router.delete("/{flow_id}/failover/{failover_id}", response_model=FailoverOut)
+def delete_failover(
+    flow_id: uuid.UUID,
+    failover_id: uuid.UUID,
+    session: Session = Depends(get_session),
+):
+    """Remove one failover target."""
+    row = session.exec(
+        select(FlowFailover).where(
+            FlowFailover.id == failover_id, FlowFailover.flow_id == flow_id
+        )
+    ).first()
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Flow {flow_id} has no failover with id {failover_id}.",
+        )
+
+    out = FailoverOut.model_validate(row, from_attributes=True)
+    session.delete(row)
+    session.commit()
+
+    return out
+
+
+@router.get("/{flow_id}/endpoint-status", response_model=list[EndpointStatusOut])
+def endpoint_status(flow_id: uuid.UUID, session: Session = Depends(get_session)):
+    """Live status of this flow's endpoint and each of its failovers.
+
+    Bypasses the status cache, so it reports what Globus says right now.
+
+    Worth running once after configuring a failover. An endpoint's status only
+    answers to a caller holding a role on it, and if AERO's credential does not,
+    every entry here reads `unknown` — in which case failover will never fire,
+    because an unanswerable check is not treated as "down".
+    """
+    f = _get_flow(session, flow_id)
+
+    def _status(endpoint) -> str:
+        up = endpoint_is_up(endpoint, use_cache=False)
+        return "unknown" if up is None else ("online" if up else "offline")
+
+    out = [
+        EndpointStatusOut(
+            endpoint=f.user_endpoint, role="primary", status=_status(f.user_endpoint)
+        )
+    ]
+    out.extend(
+        EndpointStatusOut(
+            endpoint=x.endpoint,
+            role="failover",
+            priority=x.priority,
+            enabled=x.enabled,
+            status=_status(x.endpoint),
+        )
+        for x in f.failovers
+    )
+
+    return out
 
 
 @router.post("/register", response_model=FlowOut)
 # @authenticated
 def register(fi: FlowIn, session: Session = Depends(get_session)):
     fl: Flow | None = None
+
+    _validate_failovers(fi.failover, fi.gc_endpoint)
+
     # check if function already exists
 
     f = session.exec(select(Function).where(Function.id == fi.function_uuid)).first()
@@ -329,13 +534,12 @@ def register(fi: FlowIn, session: Session = Depends(get_session)):
             endpoint=fi.gc_endpoint,
             email=fi.email,
             arg_hash=arg_hash,
+            failovers=[_failover_row(None, entry) for entry in fi.failover],
         )
 
         # After create_flow, the output Data rows are persisted and can be bound to.
         for type_name, data_obj, url in new_types:
-            create_source_type(
-                session=session, name=type_name, data=data_obj, url=url
-            )
+            create_source_type(session=session, name=type_name, data=data_obj, url=url)
     else:
         raise HTTPException(status_code=501, detail="Flow already exists")
 
@@ -343,9 +547,7 @@ def register(fi: FlowIn, session: Session = Depends(get_session)):
     # SQLAlchemy has already loaded -- so drop the two passed explicitly rather
     # than depending on whether something upstream happened to touch them.
     columns = {
-        k: v
-        for k, v in dict(fl).items()
-        if k not in ("derived_from", "contributed_to")
+        k: v for k, v in dict(fl).items() if k not in ("derived_from", "contributed_to")
     }
     flow_o = FlowOut(
         **columns, derived_from=fl.derived_from, contributed_to=fl.contributed_to

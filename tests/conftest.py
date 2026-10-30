@@ -15,6 +15,8 @@ from globus_sdk import SearchAPIError
 from globus_sdk import SpecificFlowClient
 from globus_sdk import TimersClient
 
+from aero.globus import health
+
 
 @pytest.fixture(name="globus_mock", autouse=True)
 def _mock_globus(monkeypatch):
@@ -74,7 +76,17 @@ def _mock_globus(monkeypatch):
     )
 
     monkeypatch.setattr(TimersClient, "create_job", create_job)
+
+    # The endpoint health check builds its own Globus Compute client on first
+    # use. Nothing in the suite should reach the network, and an endpoint with
+    # no verdict must never look offline -- stub the query, not the client, so a
+    # test that forgets to configure a status still gets "unknown".
+    monkeypatch.setattr(health, "_query_status", lambda endpoint_uuid: None)
+    health.clear_cache()
+
     yield
+
+    health.clear_cache()
 
 
 @pytest.fixture(name="session")
