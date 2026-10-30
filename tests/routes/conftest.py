@@ -12,9 +12,7 @@ from typing import Any
 from sqlmodel import Session
 
 import aero
-import aero.main
 import aero.models
-from aero.database import get_session
 
 
 class MockedAuthClient(BaseModel):
@@ -26,11 +24,15 @@ class MockedAuthClient(BaseModel):
 
 @pytest.fixture(name="client")
 def client_fixture(session: Session):
+    import aero.main
+
     def get_session_override():
         return session
 
     def run_flow_override(*args, **kwargs):
         pass
+
+    from aero.database import get_session
 
     aero.main.app.dependency_overrides[get_session] = get_session_override
     aero.main.app.dependency_overrides["run_flow"] = run_flow_override

@@ -46,6 +46,16 @@ def list_prov(
     limit: int = Query(default=15, le=15),
     session: Session = Depends(get_session),
 ):
+    """Get captured provenance records.
+
+    Args:
+        offset (int, optional): Starting provenance records. Defaults to 0.
+        limit (int, optional): Max amount of records to return . Defaults to Query(default=15, le=15).
+        session (Session, optional): FastAPI SQLModel Session. Defaults to Depends(get_session).
+
+    Returns:
+        _type_: _description_
+    """
     provs = session.exec(
         select(Provenance).order_by(Provenance.id.desc()).offset(offset).limit(limit)
     ).all()
@@ -55,6 +65,18 @@ def list_prov(
 @router.post("/new", response_model=Provenance)
 # @authenticated
 def add_record(pr: ProvRecord, session: Session = Depends(get_session)):
+    """Add a provenance record to the database.
+
+    Args:
+        pr (ProvRecord): Provenance record to be added.
+        session (Session, optional): FastAPI SQLModel Session. Defaults to Depends(get_session).
+
+    Raises:
+        HTTPException: _description_
+
+    Returns:
+        ProvRecord: The successfully committed provenance record.
+    """
     try:
         input_versions = [
             session.exec(

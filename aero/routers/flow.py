@@ -62,7 +62,7 @@ class FlowOut(BaseModel):
     description: str | None = Field(default=None)
     timer: int | None = Field(default=None)
     timer_job_id: uuid.UUID | None = Field(default=None)
-    policy: int = Field(nullable=False)
+    policy: int = Field(json_schema_extra={"nullable": False})
     last_executed: datetime | None = Field(default=None)
     user_endpoint: uuid.UUID | None = Field(default=None)
     arg_hash: str | None = Field(default=None)
@@ -93,6 +93,17 @@ def show_flows(
     limit: int = Query(default=15, le=15),
     session: Session = Depends(get_session),
 ):
+    """_summary_
+
+    Args:
+        offset (int, optional): _description_. Defaults to 0.
+        limit (int, optional): _description_. Defaults to Query(default=15, le=15).
+        session (Session, optional): _description_. Defaults to Depends(get_session).
+
+    Returns:
+        _type_: _description_
+    ewrwer
+    """
     flows = session.exec(
         select(Flow).order_by(Flow.id.desc()).offset(offset).limit(limit)
     ).all()
@@ -333,9 +344,7 @@ def register(fi: FlowIn, session: Session = Depends(get_session)):
 
         # After create_flow, the output Data rows are persisted and can be bound to.
         for type_name, data_obj, url in new_types:
-            create_source_type(
-                session=session, name=type_name, data=data_obj, url=url
-            )
+            create_source_type(session=session, name=type_name, data=data_obj, url=url)
     else:
         raise HTTPException(status_code=501, detail="Flow already exists")
 
@@ -343,9 +352,7 @@ def register(fi: FlowIn, session: Session = Depends(get_session)):
     # SQLAlchemy has already loaded -- so drop the two passed explicitly rather
     # than depending on whether something upstream happened to touch them.
     columns = {
-        k: v
-        for k, v in dict(fl).items()
-        if k not in ("derived_from", "contributed_to")
+        k: v for k, v in dict(fl).items() if k not in ("derived_from", "contributed_to")
     }
     flow_o = FlowOut(
         **columns, derived_from=fl.derived_from, contributed_to=fl.contributed_to
