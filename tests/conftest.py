@@ -26,6 +26,10 @@ patcher.start()
 
 @pytest.fixture(name="globus_mock", autouse=True)
 def _mock_globus(monkeypatch):
+    class MockClientApp:
+        def __init__(*args, **kwargs):
+            pass
+
     class MockAuthClient:
         def __init__(*args, **kwargs):
             pass
@@ -99,6 +103,7 @@ def _mock_globus(monkeypatch):
             return Response()
 
     with (
+        mock.patch("aero.globus.client.ClientApp", new=MockClientApp),
         mock.patch("aero.globus.client.SearchClient", new=MockSearchClient),
         mock.patch("aero.globus.client.TimersClient", new=MockSpecificTimerClient),
         mock.patch("aero.globus.client.SpecificFlowClient", new=MockSpecificFlowClient),
@@ -117,13 +122,6 @@ def session_fixture():
     patcher.stop()
 
 
-# # dsc_mock = mock.patch("osprey.server.lib.globus_search.DSaaSSearchClient")
-# # st_mock = mock.patch("osprey.server.jobs.timer.set_timer", return_value=1111)
-# # rf_mock = mock.patch("osprey.server.jobs.user_flow.run_flow")
-
-# from aero.main import create_app
-
-
 # @pytest.fixture(scope="session")
 # def app():
 #     app = create_app()
@@ -134,17 +132,6 @@ def session_fixture():
 #         yield app
 #         db.session.remove()
 #         db.drop_all()
-
-
-# # @pytest.fixture()
-# @pytest.fixture(scope="session", autouse=True)
-# def _mock_globus():
-#     with (
-#         mock.patch("aero.automate.timer.set_timer", return_value=1111) as _,
-#         mock.patch("aero.automate.policy.run_flow") as _,
-#         mock.patch("aero.globus.search.DSaaSSearchClient", autospec=True) as _,
-#     ):
-#         yield
 
 
 # def client(app):
