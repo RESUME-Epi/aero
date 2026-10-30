@@ -5,12 +5,16 @@ from dataclasses import dataclass
 from typing import Any
 from unittest import mock
 
+from globus_sdk import scopes
+
 from sqlmodel import Session
 from sqlmodel import create_engine
 from sqlmodel import SQLModel
 from sqlmodel.pool import StaticPool
 
-from aero.globus import client
+from aero import init_client
+from aero.globus.utils import FlowEnum
+from aero.globus.utils import FLOW_IDS
 from aero.globus.client import SearchAPIError
 
 engine = create_engine(
@@ -22,29 +26,39 @@ patcher.start()
 
 @pytest.fixture(name="globus_mock", autouse=True)
 def _mock_globus(monkeypatch):
-    def add_search_entry(self, entry):
-        return "entry has been added"
-
-    def create_search_index(*args, **kwargs):
-        return {"id": "index"}
-
-    def search_ingest(index, *args, **kwargs):
-        @dataclass
-        class Response:
-            text: str
-
-        if index is None:
-            raise SearchAPIError()
-        return Response("ingest complete")
-
-    def get_auth_identity(usernames):
-        return {"identities": [{"id": "myid"}]}
-
-    class MockGlobusClient:
-        def __init__(self, search_idx):
+    class MockAuthClient:
+        def __init__(*args, **kwargs):
             pass
 
+        def get_auth_identity(usernames):
+            return {"identities": [{"id": "myid"}]}
+
+    class MockSearchClient:
+        def __init__(self, *args, **kwargs):
+            self.scopes = scopes.SearchScopes
+
+        def create_search_index(*args, **kwargs):
+            return {"id": "index"}
+
+        def ingest(index, *args, **kwargs):
+            @dataclass
+            class Response:
+                text: str
+
+            if index is None:
+                raise SearchAPIError()
+            return Response("ingest complete")
+
+        def add_search_entry(self, entry):
+            return "entry has been added"
+
+        def add_app_scope(self, scope):
+            return "scope has been added"
+
     class MockSpecificFlowClient:
+        def __init__(self, *args, **kwargs):
+            self.scopes = scopes.SpecificFlowScopes(FLOW_IDS[FlowEnum.USER_FLOW])
+
         def run_flow(*args, **kwargs):
             @dataclass
             class Response:
@@ -52,8 +66,21 @@ def _mock_globus(monkeypatch):
 
             return Response()
 
+        def delete_job(*args, **kwargs):
+            @dataclass
+            class Response:
+                http_status = 201
+
+            return Response()
+
     class MockSpecificTimerClient:
-        def create_job(*args, **kwargs):
+        def __init__(*args, **kwargs):
+            pass
+
+        def set_timer(*args, **kwargs):
+            return uuid.uuid4()
+
+        def create_timer(*args, **kwargs):
             @dataclass
             class Response:
                 http_status = 201
@@ -71,24 +98,14 @@ def _mock_globus(monkeypatch):
 
             return Response()
 
-    monkeypatch.setattr(client.GlobusClient, "__init__", MockGlobusClient.__init__)
-    monkeypatch.setattr(
-        client.SearchClient,
-        "create_index",
-        create_search_index,
-    )
-    monkeypatch.setattr(client.SearchClient, "ingest", search_ingest)
-    monkeypatch.setattr(client.AuthClient, "get_identities", get_auth_identity)
-    monkeypatch.setattr(
-        client.SpecificFlowClient,
-        "run_flow",
-        MockSpecificFlowClient.run_flow,
-    )
-
-    monkeypatch.setattr(
-        client.TimersClient, "create_timer", MockSpecificTimerClient.create_job
-    )
-    yield
+    with (
+        mock.patch("aero.globus.client.SearchClient", new=MockSearchClient),
+        mock.patch("aero.globus.client.TimersClient", new=MockSpecificTimerClient),
+        mock.patch("aero.globus.client.SpecificFlowClient", new=MockSpecificFlowClient),
+        mock.patch("aero.globus.client.AuthClient", new=MockAuthClient),
+    ):
+        init_client()
+        yield
 
 
 @pytest.fixture(name="session")
