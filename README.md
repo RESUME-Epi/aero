@@ -1,5 +1,6 @@
 # AERO
-[![Ttests](https://github.com/RESUME-Epi/aero/actions/workflows/main.yml/badge.svg)](https://github.com/RESUME-Epi/aero/actions/workflows/main.yml)
+ [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+ [![Tests](https://github.com/RESUME-Epi/aero/actions/workflows/main.yml/badge.svg)](https://github.com/RESUME-Epi/aero/actions/workflows/main.yml)
 
 AERO tracks versioned data sources, records their provenance, and orchestrates
 [Globus Flows](https://www.globus.org/globus-flows-service) over them: when a source changes, the
