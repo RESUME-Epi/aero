@@ -36,6 +36,21 @@ class Config(object):
         "true",
         "yes",
     )
+    # Endpoint failover. The real opt-in is per-flow: a flow with no FlowFailover
+    # rows is never status-checked at all, so nothing is paid where none is
+    # configured. This switch turns the whole mechanism off fleet-wide without
+    # touching the database.
+    FAILOVER_ENABLED = os.getenv("AERO_FAILOVER_ENABLED", "true").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    # Seconds an endpoint's status verdict is reused for. 0 disables caching.
+    ENDPOINT_CHECK_TTL = int(os.getenv("AERO_ENDPOINT_CHECK_TTL", "30"))
+    # Per-call deadline. Generous on purpose: a slow status call should return a
+    # real verdict rather than time out into "unknown", because "unknown" never
+    # fails over.
+    ENDPOINT_CHECK_TIMEOUT = float(os.getenv("AERO_ENDPOINT_CHECK_TIMEOUT", "20"))
     WEBHOOK_SECRET = os.getenv("AERO_WEBHOOK_SECRET")
     REQUIRE_AUTH = os.getenv("AERO_REQUIRE_AUTH", "false").lower() in (
         "1",

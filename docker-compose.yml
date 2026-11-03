@@ -21,6 +21,12 @@ services:
       # false to run without Globus Search: indexing needs an index plus the ingest
       # role on it, and nothing but GET /data/search reads it.
       AERO_SEARCH_ENABLED: ${AERO_SEARCH_ENABLED:-true}
+      # Endpoint failover (docs/endpoint-failover.md). The per-flow failover
+      # rows are the real opt-in -- a flow with none is never status-checked --
+      # so this is only the fleet-wide off switch.
+      AERO_FAILOVER_ENABLED: ${AERO_FAILOVER_ENABLED:-true}
+      AERO_ENDPOINT_CHECK_TTL: ${AERO_ENDPOINT_CHECK_TTL:-30}
+      AERO_ENDPOINT_CHECK_TIMEOUT: ${AERO_ENDPOINT_CHECK_TIMEOUT:-20}
       # TLS is terminated by a CELS front end, which forwards to nginx, which
       # forwards here -- so X-Forwarded-Proto arrives from a non-loopback
       # address. uvicorn trusts only 127.0.0.1 by default and would drop it,
