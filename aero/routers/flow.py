@@ -18,7 +18,7 @@ from sqlmodel import Session
 
 from typing import Optional
 
-from aero.auth import require_globus_auth
+from aero.globus.auth import require_globus_auth
 from aero.database import get_session
 
 from aero.models.flows import create_flow

@@ -1,5 +1,4 @@
 from uuid import UUID
-from datetime import datetime
 
 
 from fastapi import APIRouter
@@ -12,7 +11,7 @@ from pydantic import BaseModel
 from sqlmodel import select
 from sqlmodel import Session
 
-from aero.auth import require_globus_auth
+from aero.globus.auth import require_globus_auth
 from aero.database import get_session
 
 from aero.models.data import Data
@@ -30,9 +29,7 @@ router = APIRouter(
 
 
 class ProvRecord(BaseModel):
-    input_data:  dict[
-        str, dict[str, str | bool | int | float | list[str | None] | None]
-    ]
+    input_data: dict[str, dict[str, str | bool | int | float | list[str | None] | None]]
     output_data: dict[
         str, dict[str, str | bool | int | float | list[str | None] | None]
     ]
