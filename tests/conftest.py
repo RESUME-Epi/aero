@@ -34,14 +34,14 @@ def _mock_globus(monkeypatch):
         def __init__(*args, **kwargs):
             pass
 
-        def get_auth_identity(usernames):
+        def get_identities(self, usernames):
             return {"identities": [{"id": "myid"}]}
 
     class MockSearchClient:
         def __init__(self, *args, **kwargs):
             self.scopes = scopes.SearchScopes
 
-        def create_search_index(*args, **kwargs):
+        def create_index(*args, **kwargs):
             return {"id": "index"}
 
         def ingest(index, *args, **kwargs):
@@ -99,6 +99,14 @@ def _mock_globus(monkeypatch):
                         raise TypeError(
                             "Index must be an integer or a string (field name)"
                         )
+
+            return Response()
+
+        def delete_job(self, job_id):
+            @dataclass
+            class Response:
+                http_status = 200
+                http_reason = "success"
 
             return Response()
 
