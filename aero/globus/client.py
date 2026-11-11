@@ -138,8 +138,8 @@ class GlobusClient:
         if trigger_url and source_data_id is not None:
             tasks = copy.deepcopy(tasks)
             for task in tasks:
-                input_data = task.get("kwargs", {}).get("aero", {}).get(
-                    "input_data", {}
+                input_data = (
+                    task.get("kwargs", {}).get("aero", {}).get("input_data", {})
                 )
                 for entry in input_data.values():
                     if entry.get("id") == str(source_data_id):
@@ -169,12 +169,12 @@ class GlobusClient:
         self,
         interval_in_sec: int,
         id: int,
-        email: str,
+        email: str | None,
         flow_type: FlowEnum,
         user_function: str,
         pull_function_uuid: str,
         commit_function_uuid: str,
-        function_args: str,
+        function_args: JSON,
         user_endpoint: str,
         **kwargs,
     ) -> UUID:

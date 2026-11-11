@@ -1,17 +1,16 @@
 [project]
-name = "DSaaS"
-description = "Data streams as a service"
-version = "0.0.1a"
+name = "AERO"
+description = "Autonomous event-based research orchestrator"
+version = "1.0.0"
 authors = [
     { name = "Valerie Hayot-Sasson", email = "vhayot@uchicago.edu"    },
+    { name = "Nicholson Collier", email = "ncollier@anl.gov"},
     { name = "Sudershan Sridhar",    email = "sudershan@uchicago.edu" }
 ]
 dependencies = [
-    "proxystore",
     "requests",
     "pandas",
     "jsonschema",
-    "psycopg2",
     "globus_compute_sdk",
     "dill",
     "globus_sdk>=4,<5",
@@ -24,7 +23,8 @@ dependencies = [
     # column types explicitly (aero.models.types.UTCDateTime), so that particular
     # drift cannot recur, but the rest of the schema is still inferred. Move this
     # deliberately, with the tests run against the new version first.
-    "sqlmodel==0.0.47"
+    "sqlmodel==0.0.47",
+    "mkdocstrings-python>=2.0.10",
 ]
 
 [project.optional-dependencies]
@@ -32,9 +32,6 @@ dev = [
     "pre-commit",
     "tox",
     "black"
-]
-server = [
-    "flask==2.1.0",
 ]
 
 [build-system]
@@ -56,8 +53,6 @@ branch = true
 omit = [
     "tests/*",
     "aero/database.py",
-    #"aero/app/decorators.py",
-    #"aero/globus/*",
     "aero/app/utils.py",
 ]
 fail_under = 100
@@ -65,4 +60,9 @@ exclude_also = [
     "def search",
     "except ServiceError",
     "except Exception"
+]
+
+[dependency-groups]
+dev = [
+    "zensical>=0.0.71",
 ]
