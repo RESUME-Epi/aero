@@ -118,6 +118,8 @@ class GlobusClient:
         signed_url: str | None = None,
         source_data_id=None,
         primary_endpoint=None,
+        tried_endpoints: list | None = None,
+        pinned_versions: dict[str, dict] | None = None,
     ):
         """Run a user (analysis) flow.
 
@@ -133,6 +135,18 @@ class GlobusClient:
         ``endpoint_uuid`` differs from it the run is failing over, and each task
         still naming the primary is repointed — see the comment below for why
         that is not redundant with ``run_input["endpoint"]``.
+
+        Every task's ``aero`` block also gets a ``run`` entry naming the endpoint
+        this run goes to and the endpoints a failed run has already been tried
+        on (``tried_endpoints``). The analysis function cannot otherwise see
+        either, and it needs both to hand a failed run on to the next failover
+        without coming back to an endpoint that has already failed it.
+
+        ``pinned_versions`` maps an input's data id to the version fields of the
+        revision it must use, as ``GET /data/{id}/latest`` would have supplied
+        them. A pinned input has a ``version``, so the worker's pull function
+        leaves it alone rather than resolving the latest -- which is how a
+        failover re-run processes the same data the failed run did.
         """
         flow_id = FLOW_IDS[FlowEnum.USER_FLOW]
 
@@ -155,12 +169,27 @@ class GlobusClient:
             and str(primary_endpoint) != str(endpoint_uuid)
         )
 
-        if inject_urls or failing_over:
-            # One copy for both rewrites. Per-run values never go back to
-            # Flow.function_args: a transient signed url would outlive the
-            # signature that made it valid, and a failover endpoint would
-            # silently become the flow's registered home.
-            tasks = copy.deepcopy(tasks)
+        # Always copied now, since every run gets its own `run` context. Per-run
+        # values never go back to Flow.function_args: a transient signed url
+        # would outlive the signature that made it valid, a failover endpoint
+        # would silently become the flow's registered home, and a pinned
+        # version would freeze every later run on old data.
+        tasks = copy.deepcopy(tasks)
+
+        run_context = {
+            "endpoint": str(endpoint_uuid) if endpoint_uuid is not None else None,
+            "tried_endpoints": [str(e) for e in tried_endpoints or []],
+        }
+        for task in tasks:
+            aero = task.get("kwargs", {}).get("aero")
+            if not isinstance(aero, dict):
+                continue
+            aero["run"] = dict(run_context)
+            if pinned_versions:
+                for entry in aero.get("input_data", {}).values():
+                    pin = pinned_versions.get(str(entry.get("id")))
+                    if pin:
+                        entry.update(pin)
 
         if inject_urls:
             for task in tasks:

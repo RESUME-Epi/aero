@@ -152,18 +152,8 @@ class Flow(SQLModel, table=True):
                 failover.endpoint,
                 failover.priority,
             )
-            return RunTarget(
-                endpoint=failover.endpoint,
-                # An unset function on the failover row means "the same one":
-                # only an endpoint on a different Python minor version needs its
-                # functions re-registered under new uuids.
-                function_id=failover.function_id or self.function_id,
-                pull_function_id=failover.pull_function_id or self.pull_function_id,
-                commit_function_id=(
-                    failover.commit_function_id or self.commit_function_id
-                ),
-                is_failover=True,
-                reason=f"endpoint {self.user_endpoint} is offline",
+            return self._failover_target(
+                failover, reason=f"endpoint {self.user_endpoint} is offline"
             )
 
         # Submitting to a dead endpoint is still better than dropping the
@@ -183,6 +173,87 @@ class Flow(SQLModel, table=True):
             commit_function_id=primary.commit_function_id,
             reason="the primary and every failover report offline",
         )
+
+    def _failover_target(self, failover: FlowFailover, reason: str) -> RunTarget:
+        return RunTarget(
+            endpoint=failover.endpoint,
+            # An unset function on the failover row means "the same one": only
+            # an endpoint on a different Python minor version needs its
+            # functions re-registered under new uuids.
+            function_id=failover.function_id or self.function_id,
+            pull_function_id=failover.pull_function_id or self.pull_function_id,
+            commit_function_id=failover.commit_function_id or self.commit_function_id,
+            is_failover=True,
+            reason=reason,
+        )
+
+    def _select_failover_target(
+        self, exclude: set[UUID], reason: str | None = None
+    ) -> "RunTarget | None":
+        """Where to re-run a run that failed, skipping the endpoints in ``exclude``.
+
+        For a run that reached its endpoint and failed there -- an HPC job the
+        analysis submitted fell over, say -- rather than one whose endpoint was
+        down before it started. The failed endpoint is usually online, so
+        ``_select_run_target`` would send the re-run straight back to it; here
+        the caller names the endpoints that have failed and they are skipped.
+
+        Candidates are the primary and then the enabled failovers in priority
+        order. The primary is one so that a run which originally failed over
+        because the primary was offline can return to it once it is back. As
+        in ``_select_run_target``, only an explicit offline disqualifies a
+        candidate; an unknown status does not.
+
+        None when nothing is left to try. ``exclude`` only grows along a chain
+        of re-runs and the candidates are finite, so a run that fails
+        everywhere stops here instead of looping.
+        """
+        if not Config.FAILOVER_ENABLED:
+            return None
+
+        why = reason or "the run failed"
+        excluded = {str(e) for e in exclude}
+
+        if str(self.user_endpoint) not in excluded:
+            if endpoint_is_up(self.user_endpoint) is not False:
+                logger.warning(
+                    "flow %s: %s on %s, re-running on the primary %s",
+                    self.id,
+                    why,
+                    sorted(excluded),
+                    self.user_endpoint,
+                )
+                return RunTarget(
+                    endpoint=self.user_endpoint,
+                    function_id=self.function_id,
+                    pull_function_id=self.pull_function_id,
+                    commit_function_id=self.commit_function_id,
+                    reason=why,
+                )
+
+        for failover in self.failovers:
+            if not failover.enabled or str(failover.endpoint) in excluded:
+                continue
+            if endpoint_is_up(failover.endpoint) is False:
+                continue
+
+            logger.warning(
+                "flow %s: %s on %s, re-running on %s (priority %s)",
+                self.id,
+                why,
+                sorted(excluded),
+                failover.endpoint,
+                failover.priority,
+            )
+            return self._failover_target(failover, reason=why)
+
+        logger.warning(
+            "flow %s: %s on %s, and no failover endpoint is left to try",
+            self.id,
+            why,
+            sorted(excluded),
+        )
+        return None
 
     def _start_timer_flow(self, session: Session):
         self.timer_job_id = GLOBUS_CLIENT.set_timer(
@@ -335,6 +406,8 @@ class Flow(SQLModel, table=True):
         at_registration: bool = False,
         force: bool = False,
         target: "RunTarget | None" = None,
+        tried_endpoints: list | None = None,
+        pinned_versions: dict[str, dict] | None = None,
     ) -> int:
         # try:
         function_args = self.function_args
@@ -400,6 +473,8 @@ class Flow(SQLModel, table=True):
                     signed_url=signed_url,
                     source_data_id=source_data_id,
                     primary_endpoint=self.user_endpoint,
+                    tried_endpoints=tried_endpoints,
+                    pinned_versions=pinned_versions,
                 )
                 # Stamped on submission, not on success. A run that fails still
                 # moves last_executed forward, so every version that existed

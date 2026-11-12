@@ -97,6 +97,14 @@ task dict in `Flow.function_args`, and the user flow's `execute` state dispatche
 `run_input["endpoint"]` moves the pull and commit but leaves the analysis on the dead endpoint —
 hence the `primary_endpoint` argument to `run_flow`.
 
+**Failure-triggered failover.** `POST /flow/{id}/failover/run` re-runs a run that *reached* its
+endpoint and failed there (an HPC job the analysis submitted, say), via
+`Flow._select_failover_target(exclude)`: the primary, then enabled failovers, skipping the
+endpoints named as failed or already tried. Every analysis run carries
+`aero["run"] = {endpoint, tried_endpoints}` so the worker can send the tried list back; it only
+grows, so a chain that fails everywhere ends with `submitted: false`. `input_versions` pins the
+re-run to the failed run's revisions (`pinned_versions` in `run_flow`).
+
 ## Constraints that bite
 
 **There are no migrations.** `SQLModel.metadata.create_all()` at startup is the only schema

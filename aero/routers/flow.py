@@ -28,7 +28,9 @@ from aero.models.flows import Flow
 from aero.models.flows import TriggerEnum
 from aero.models.function import Function
 from aero.models.data import Data
+from aero.models.data_version import DataVersion
 from aero.models.source_type import SourceType
+from aero.routers.data import _resolve_trigger_url
 from aero.routers.data import create_source_type
 
 router = APIRouter(
@@ -387,6 +389,139 @@ def endpoint_status(flow_id: uuid.UUID, session: Session = Depends(get_session))
     )
 
     return out
+
+
+class FailoverRunIn(BaseModel):
+    # The endpoint the run failed on. Omitted, it is the flow's primary: a run
+    # handed over by hand means "run this somewhere other than its home".
+    failed_endpoint: uuid.UUID | None = Field(default=None)
+    # Endpoints earlier runs in this chain already failed on. The worker reads
+    # them from its `aero.run` context and sends them back, so the chain never
+    # returns to one of them.
+    tried_endpoints: list[uuid.UUID] = Field(default=[])
+    reason: str | None = Field(default=None)
+    # data id -> DataVersion id: the revisions the failed run processed, so the
+    # re-run processes the same ones. An input left out resolves to its latest.
+    input_versions: dict[uuid.UUID, uuid.UUID] = Field(default={})
+
+
+def _pin_versions(
+    session: Session, f: Flow, input_versions: dict[uuid.UUID, uuid.UUID]
+) -> dict[str, dict]:
+    """The version fields a pinned input needs, keyed by data id.
+
+    The same fields the worker's pull function would have copied from
+    `GET /data/{id}/latest`. A pinned input arrives with its `version` set, so the
+    pull function skips it -- anything not supplied here would simply be missing
+    when the analysis wrapper goes to fetch the file.
+    """
+    inputs = {d.id: d for d in f.derived_from}
+    pins = {}
+    for data_id, version_id in input_versions.items():
+        d = inputs.get(data_id)
+        if d is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{data_id} is not an input of flow {f.id}.",
+            )
+
+        v = session.exec(
+            select(DataVersion).where(
+                DataVersion.id == version_id, DataVersion.data_id == data_id
+            )
+        ).first()
+        if v is None or v.data_file is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{version_id} is not a version of input {data_id}.",
+            )
+
+        pin = {
+            "version": v.version,
+            "version_id": str(v.id),
+            "file_bn": v.data_file.file_name,
+            "encoding": v.data_file.encoding,
+        }
+        if d.no_copy:
+            trigger_url = _resolve_trigger_url(session, d, v.source_key)
+            if trigger_url:
+                pin["trigger_url"] = trigger_url
+        pins[str(data_id)] = pin
+
+    return pins
+
+
+@router.post("/{flow_id}/failover/run", response_model=FlowRunOut)
+def run_on_failover(
+    flow_id: uuid.UUID,
+    payload: FailoverRunIn = FailoverRunIn(),
+    session: Session = Depends(get_session),
+):
+    """Re-run an analysis somewhere other than the endpoint it failed on.
+
+    For a run that reached its endpoint and failed there -- typically called by
+    the analysis itself, through `aero_client.failover.request_failover`, when an
+    HPC job it submitted fails. `POST /flow/{id}/run` would not do: it moves off
+    an endpoint only when that endpoint reports offline, and this one is
+    usually online, so the re-run would go straight back to it.
+
+    The re-run goes to the first candidate not in `failed_endpoint` or
+    `tried_endpoints` and not reporting offline. The candidates are the primary,
+    then the enabled failovers in priority order. Both endpoint lists are passed
+    on to the new run, so if it fails as well and asks again, the chain moves on
+    to the next candidate. It ends with `submitted: false` when no candidate is
+    left.
+
+    Always forced: the failed run already moved `last_executed` past the data it
+    was meant to process. `input_versions` pins the re-run to the revisions the
+    failed run had.
+    """
+    f = _get_flow(session, flow_id)
+    if f.policy not in MANUAL_RUN_POLICIES:
+        supported = ", ".join(f"{p.name} ({p.value})" for p in MANUAL_RUN_POLICIES)
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Flow policy {f.policy} does not support a failover run. "
+                f"Only {supported} do."
+            ),
+        )
+
+    pins = _pin_versions(session, f, payload.input_versions)
+
+    failed = payload.failed_endpoint or f.user_endpoint
+    # Ordered and de-duplicated: the next run gets it back as its own tried list.
+    tried = list(dict.fromkeys([*payload.tried_endpoints, failed]))
+
+    # Forced, but an input with no version at all still cannot run.
+    submitted, reason = f._input_run_decision(force=True)
+    if not submitted:
+        return FlowRunOut(submitted=False, reason=reason, flow=_flow_out(f))
+
+    target = f._select_failover_target(set(tried), reason=payload.reason)
+    if target is None:
+        return FlowRunOut(
+            submitted=False,
+            reason=(
+                "no failover endpoint left to try; tried: "
+                f"{', '.join(str(e) for e in tried)}"
+            ),
+            flow=_flow_out(f),
+        )
+
+    f._run_flow(
+        session=session,
+        force=True,
+        target=target,
+        tried_endpoints=tried,
+        pinned_versions=pins,
+    )
+    return FlowRunOut(
+        submitted=True,
+        endpoint=target.endpoint,
+        failover=target.is_failover,
+        flow=_flow_out(f),
+    )
 
 
 @router.post("/register", response_model=FlowOut)
