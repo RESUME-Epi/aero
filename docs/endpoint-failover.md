@@ -188,11 +188,97 @@ It is not enough for it to be online:
 An endpoint reporting `online` with no workers, the wrong profile, or a Python mismatch
 will still fail the run. This is a liveness check, not a readiness check.
 
+## Failure-triggered failover
+
+Everything above happens **before** a run is submitted, and only moves a run off an endpoint
+that reports offline. That misses a run that reaches a healthy endpoint and fails there.
+The motivating case is an analysis that submits a job to an HPC cluster and polls it: the
+submission is rejected, or the job dies, and the analysis knows it while the endpoint still
+reports `online`. Re-submitting through `POST /flow/{id}/run` would send it straight back.
+
+So the analysis can ask for the run to go elsewhere:
+
+```
+POST /flow/{id}/failover/run
+{
+  "failed_endpoint": "<the endpoint the run failed on>",   // default: the flow's primary
+  "tried_endpoints": ["<endpoints earlier runs in this chain failed on>"],
+  "reason": "PBS job 1234 exited 271",
+  "input_versions": {"<data id>": "<DataVersion id>"}
+}
+```
+
+The worker side is `aero_client.failover.request_failover(aero_run, reason)`, which posts
+this and then raises so the failed run's commit step never runs. `aero failover run
+<flow-id>` posts it by hand. The response is the same shape as `POST /flow/{id}/run`.
+
+### Selection
+
+`Flow._select_failover_target(exclude)` takes the candidates in order — the primary, then
+the enabled failovers by priority — and returns the first one that is not in `exclude`
+(`failed_endpoint` plus `tried_endpoints`) and not explicitly offline. As before, `unknown`
+does not disqualify.
+
+The primary is a candidate. A run that originally failed over because the primary was
+offline, and then failed on the failover, has the primary *not* in its tried list (it was
+offline, not tried), so once the primary is back the re-run goes home.
+
+`AERO_FAILOVER_ENABLED=false` turns this off too. With nothing to choose, the route answers
+`submitted: false`.
+
+### The run context, and why the chain terminates
+
+The analysis cannot see the endpoint it is running on — that lives in the task envelope,
+which Globus Compute does not hand to the function. So `GlobusClient.run_flow` injects,
+into every analysis task's `aero` block, on every run:
+
+```python
+aero["run"] = {"endpoint": "<where this run went>", "tried_endpoints": [...]}
+```
+
+The client's `aero_format` wrapper passes this (with `flow_id` and the input version ids) to
+a function that declares an `aero_run` parameter. `request_failover` sends `endpoint` back as
+`failed_endpoint` and `tried_endpoints` as-is. The route appends the failed endpoint and
+gives the result to the new run as *its* `tried_endpoints`.
+
+That list only grows along a chain, and the candidates are finite. A run that fails
+everywhere therefore ends with `submitted: false`, "no failover endpoint left to try",
+instead of looping.
+
+### Same data, not latest data
+
+A failover re-run is **always forced**, because the failed run already moved
+`last_executed` past the data it was meant to process.
+
+It also processes the **same revisions** the failed run did, not whatever is latest by the
+time the re-run starts. HPC jobs run for hours, and a newer version may have landed in the
+meantime. `input_versions` maps each input to the `DataVersion` id it used. The route looks
+each one up (400 unless it really is a version of one of the flow's inputs) and builds
+the fields `GET /data/{id}/latest` would have supplied: `version`, `version_id`, `file_bn`,
+`encoding`, plus a resolved `trigger_url` for a no-copy input. It passes them to
+`run_flow` as `pinned_versions`, which writes them onto the matching `input_data` entries
+in the per-run deep copy. A pinned input arrives with `version` set, so the worker's
+`get_versions` leaves it alone. Inputs not pinned resolve to their latest as usual.
+
+### Limitations
+
+- **No fresh signed url.** A notify-triggered no-copy run carries a presigned
+  `signed_url`; the re-run does not, since AERO holds no object-store credentials to sign
+  with. On a private bucket only inputs marked `fetch: false`, which the analysis
+  retrieves with its own credentials, survive a failover re-run.
+- **Auth is the worker's.** `request_failover` authenticates the way the other worker
+  callbacks in `aero_client.jobs` do, with the token stored on the endpoint host. Like
+  those callbacks, it is only as good as that token is under `AERO_REQUIRE_AUTH=true`.
+- **The endpoint needs the new client.** The function must be re-registered so it picks up
+  the wrapper that passes `aero_run`, and the endpoint needs an `aero_client` that has
+  `aero_client.failover`.
+
 ## What is not recorded
 
 AERO persists no Globus run id and no run status, so there is nothing to write "this run
 used the failover" onto. The decision appears in two places only: the server log
-(`flow <id>: endpoint <x> is offline, failing over to <y>`), and the `endpoint` /
-`failover` fields of the `POST /flow/{id}/run` response, which `aero run` prints.
+(`flow <id>: endpoint <x> is offline, failing over to <y>`, or `flow <id>: <reason> on
+[<tried>], re-running on <y>`), and the `endpoint` / `failover` fields of the run
+response, which `aero run` and `aero failover run` print.
 
 Persisting it would mean tracking runs, which is a larger change than this one.

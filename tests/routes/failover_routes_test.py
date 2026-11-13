@@ -282,3 +282,167 @@ def test_a_skipped_run_names_no_endpoint(client, session, analysis, noversion_da
     assert r.json()["submitted"] is False
     assert r.json()["endpoint"] is None
     assert r.json()["failover"] is False
+
+
+# --- POST /flow/{id}/failover/run: re-running a run that failed -------------
+
+
+@pytest.fixture(name="submitted")
+def submitted_fixture(monkeypatch):
+    """Capture what would go to the Globus flow service."""
+    sent = []
+    monkeypatch.setattr(
+        aero.models.flows.GLOBUS_CLIENT, "run_flow", lambda **kw: sent.append(kw)
+    )
+    return sent
+
+
+def _failover_run(client, flow_id, **body):
+    return client.post(f"/flow/{flow_id}/failover/run", json=body)
+
+
+def test_failover_run_skips_the_endpoint_it_failed_on(client, analysis, submitted):
+    """The primary is online -- only being named as failed keeps the run off it."""
+    backup = uuid4()
+    _add(client, analysis.id, backup)
+
+    r = _failover_run(
+        client,
+        analysis.id,
+        failed_endpoint=str(analysis.user_endpoint),
+        reason="PBS job 1234 exited 271",
+    )
+
+    assert r.status_code == 200, r.content
+    assert r.json()["submitted"] is True
+    assert r.json()["endpoint"] == str(backup)
+    assert r.json()["failover"] is True
+    assert submitted[0]["endpoint_uuid"] == backup
+    assert submitted[0]["tried_endpoints"] == [analysis.user_endpoint]
+
+
+def test_failover_run_defaults_the_failed_endpoint_to_the_primary(
+    client, analysis, submitted
+):
+    """A run handed over by hand: "run this somewhere other than its home"."""
+    backup = uuid4()
+    _add(client, analysis.id, backup)
+
+    r = _failover_run(client, analysis.id)
+
+    assert r.json()["endpoint"] == str(backup)
+
+
+def test_the_tried_list_accumulates_along_the_chain(client, analysis, submitted):
+    first, second = uuid4(), uuid4()
+    _add(client, analysis.id, first, priority=1)
+    _add(client, analysis.id, second, priority=2)
+
+    r = _failover_run(
+        client,
+        analysis.id,
+        failed_endpoint=str(first),
+        tried_endpoints=[str(analysis.user_endpoint)],
+    )
+
+    assert r.json()["endpoint"] == str(second)
+    assert submitted[0]["tried_endpoints"] == [analysis.user_endpoint, first]
+
+
+def test_the_chain_ends_when_nothing_is_left(client, analysis, submitted):
+    backup = uuid4()
+    _add(client, analysis.id, backup)
+
+    r = _failover_run(
+        client,
+        analysis.id,
+        failed_endpoint=str(backup),
+        tried_endpoints=[str(analysis.user_endpoint)],
+    )
+
+    assert r.status_code == 200
+    assert r.json()["submitted"] is False
+    assert "no failover endpoint left" in r.json()["reason"]
+    assert r.json()["endpoint"] is None
+    assert submitted == []
+
+
+def test_failover_run_is_forced(client, session, analysis, submitted):
+    """The failed run already moved last_executed past its data."""
+    _add(client, analysis.id, uuid4())
+    client.post(f"/flow/{analysis.id}/run", json={"force": True})
+    submitted.clear()
+
+    assert client.post(f"/flow/{analysis.id}/run").json()["submitted"] is False
+
+    r = _failover_run(client, analysis.id)
+
+    assert r.json()["submitted"] is True
+    assert len(submitted) == 1
+
+
+def test_failover_run_pins_the_failed_runs_versions(
+    client, session, analysis, data, submitted
+):
+    _add(client, analysis.id, uuid4())
+    old = data.last_version()
+    newer = aero.models.data_version.create_dataversion(
+        session=session, version=2, checksum="456", data_id=data.id
+    )
+    aero.models.data_file.create_datafile(
+        session=session, file_name="newer", size=2, version_id=newer.id
+    )
+
+    r = _failover_run(client, analysis.id, input_versions={str(data.id): str(old.id)})
+
+    assert r.status_code == 200, r.content
+    assert submitted[0]["pinned_versions"] == {
+        str(data.id): {
+            "version": 1,
+            "version_id": str(old.id),
+            "file_bn": "testfile",
+            "encoding": "utf-8",
+        }
+    }
+
+
+def test_failover_run_rejects_a_pin_on_something_not_an_input(
+    client, analysis, noversion_data, submitted
+):
+    _add(client, analysis.id, uuid4())
+
+    r = _failover_run(
+        client, analysis.id, input_versions={str(noversion_data.id): str(uuid4())}
+    )
+
+    assert r.status_code == 400
+    assert "not an input" in r.json()["detail"]
+    assert submitted == []
+
+
+def test_failover_run_rejects_a_version_of_another_input(
+    client, session, analysis, data, noversion_data, submitted
+):
+    _add(client, analysis.id, uuid4())
+    elsewhere = aero.models.data_version.create_dataversion(
+        session=session, version=1, checksum="x", data_id=noversion_data.id
+    )
+
+    r = _failover_run(
+        client, analysis.id, input_versions={str(data.id): str(elsewhere.id)}
+    )
+
+    assert r.status_code == 400
+    assert "not a version" in r.json()["detail"]
+
+
+def test_failover_run_refuses_a_timer_flow(client, flow, submitted):
+    """`flow` is policy NONE: not one a run can be submitted for by hand."""
+    r = _failover_run(client, flow.id)
+
+    assert r.status_code == 400
+    assert "does not support a failover run" in r.json()["detail"]
+
+
+def test_failover_run_404s_for_an_unknown_flow(client):
+    assert _failover_run(client, uuid4()).status_code == 404

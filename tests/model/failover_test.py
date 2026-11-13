@@ -288,6 +288,139 @@ def test_ingestion_flow_also_fails_over(session, data, statuses, monkeypatch):
     assert sent["user_endpoint"] == backup
 
 
+# --- re-running a run that failed on its endpoint ---------------------------
+
+
+def test_failed_primary_moves_to_the_first_failover(session, analysis, statuses):
+    """The primary is online, so only the exclusion keeps the re-run off it."""
+    table, _ = statuses
+    first, second = uuid4(), uuid4()
+    _add_failover(session, analysis, second, priority=5)
+    _add_failover(session, analysis, first, priority=1)
+    table[str(PRIMARY)] = True
+
+    target = analysis._select_failover_target({PRIMARY}, reason="PBS job failed")
+
+    assert target.endpoint == first
+    assert target.is_failover is True
+    assert target.reason == "PBS job failed"
+
+
+def test_tried_endpoints_are_skipped(session, analysis, statuses):
+    first, second = uuid4(), uuid4()
+    _add_failover(session, analysis, first, priority=1)
+    _add_failover(session, analysis, second, priority=2)
+
+    target = analysis._select_failover_target({PRIMARY, first})
+
+    assert target.endpoint == second
+
+
+def test_exclusion_matches_strings_as_well_as_uuids(session, analysis, statuses):
+    """The tried list round-trips through the worker as strings."""
+    backup = uuid4()
+    _add_failover(session, analysis, backup)
+
+    assert analysis._select_failover_target({str(PRIMARY)}).endpoint == backup
+
+
+def test_offline_candidates_are_skipped_but_unknown_ones_are_not(
+    session, analysis, statuses
+):
+    table, _ = statuses
+    down, unknown = uuid4(), uuid4()
+    _add_failover(session, analysis, down, priority=1)
+    _add_failover(session, analysis, unknown, priority=2)
+    table[str(down)] = False
+
+    assert analysis._select_failover_target({PRIMARY}).endpoint == unknown
+
+
+def test_disabled_failovers_are_not_retried(session, analysis, statuses):
+    _, asked = statuses
+    off = uuid4()
+    _add_failover(session, analysis, off, enabled=False)
+
+    assert analysis._select_failover_target({PRIMARY}) is None
+    assert str(off) not in asked
+
+
+def test_a_failed_failover_can_return_to_the_primary(session, analysis, statuses):
+    """A run that failed over because the primary was down, and then failed.
+
+    The primary is not in the tried list -- it was offline, not tried -- so once
+    it is back it is the next candidate.
+    """
+    table, _ = statuses
+    backup = uuid4()
+    _add_failover(session, analysis, backup)
+    table[str(PRIMARY)] = True
+
+    target = analysis._select_failover_target({backup})
+
+    assert target.endpoint == PRIMARY
+    assert target.is_failover is False
+    assert target.function_id == analysis.function_id
+
+
+def test_a_still_offline_primary_is_not_returned_to(session, analysis, statuses):
+    table, _ = statuses
+    first, second = uuid4(), uuid4()
+    _add_failover(session, analysis, first, priority=1)
+    _add_failover(session, analysis, second, priority=2)
+    table[str(PRIMARY)] = False
+
+    assert analysis._select_failover_target({first}).endpoint == second
+
+
+def test_nothing_left_ends_the_chain(session, analysis, statuses):
+    """The loop guard: every candidate tried, so no re-run."""
+    backup = uuid4()
+    _add_failover(session, analysis, backup)
+
+    assert analysis._select_failover_target({PRIMARY, backup}) is None
+
+
+def test_no_failovers_means_nowhere_to_go(analysis, statuses):
+    assert analysis._select_failover_target({PRIMARY}) is None
+
+
+def test_kill_switch_stops_failure_failover(session, analysis, statuses, monkeypatch):
+    _, asked = statuses
+    _add_failover(session, analysis, uuid4())
+    monkeypatch.setattr(Config, "FAILOVER_ENABLED", False)
+
+    assert analysis._select_failover_target({PRIMARY}) is None
+    assert asked == []
+
+
+def test_failure_failover_uses_the_rows_functions(session, analysis, statuses):
+    backup, alt_fn = uuid4(), uuid4()
+    _add_failover(session, analysis, backup, function_id=alt_fn)
+
+    target = analysis._select_failover_target({PRIMARY})
+
+    assert target.function_id == alt_fn
+    assert target.pull_function_id == analysis.pull_function_id
+
+
+def test_run_flow_passes_the_run_context_through(
+    session, analysis, version, statuses, monkeypatch
+):
+    sent = {}
+    monkeypatch.setattr(
+        aero.models.flows.GLOBUS_CLIENT, "run_flow", lambda **kw: sent.update(kw)
+    )
+    pins = {str(uuid4()): {"version": 1}}
+
+    analysis._run_flow(
+        session=session, force=True, tried_endpoints=[PRIMARY], pinned_versions=pins
+    )
+
+    assert sent["tried_endpoints"] == [PRIMARY]
+    assert sent["pinned_versions"] == pins
+
+
 def test_deleting_a_flow_takes_its_failovers(session, analysis):
     """FlowFailover.flow_id is non-nullable, so the cascade has to clear them.
 

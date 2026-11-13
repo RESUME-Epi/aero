@@ -232,3 +232,64 @@ def test_without_a_primary_nothing_is_repointed(sent, tasks):
 
     assert sent["endpoint"] == BACKUP
     assert sent["tasks"][0]["endpoint"] == "e"
+
+
+# --- per-run context: where this run is, and what it must process ------------
+
+
+def test_every_run_carries_its_run_context(sent, tasks):
+    """The analysis cannot see its task envelope, so the endpoint rides in `aero`.
+
+    It needs it, with the endpoints already tried, to hand a failed run on.
+    """
+    _run(tasks)
+
+    assert sent["tasks"][0]["kwargs"]["aero"]["run"] == {
+        "endpoint": "e",
+        "tried_endpoints": [],
+    }
+
+
+def test_the_run_context_names_the_failover_and_the_tried(sent, tasks):
+    _failover_run(tasks, tried_endpoints=["e"])
+
+    assert sent["tasks"][0]["kwargs"]["aero"]["run"] == {
+        "endpoint": BACKUP,
+        "tried_endpoints": ["e"],
+    }
+
+
+def test_the_run_context_is_not_persisted(sent, tasks):
+    before = json.dumps(tasks, sort_keys=True)
+
+    _run(tasks, tried_endpoints=["e"])
+
+    assert json.dumps(tasks, sort_keys=True) == before
+
+
+def test_pins_land_only_on_the_pinned_input(sent, tasks):
+    """A pinned input has a version, so the worker's pull leaves it alone."""
+    pin = {"version": 3, "version_id": "v3", "file_bn": "a.xml.gz", "encoding": "utf-8"}
+
+    _run(tasks, pinned_versions={SRC: pin})
+
+    input_data = sent["tasks"][0]["kwargs"]["aero"]["input_data"]
+    assert input_data["report"]["version"] == 3
+    assert input_data["report"]["file_bn"] == "a.xml.gz"
+    assert input_data["report"]["collection_url"] == "https://c/"
+    assert input_data["other"]["version"] is None
+
+
+def test_pins_are_not_persisted(sent, tasks):
+    """A stored pin would freeze every later run on the same old revision."""
+    before = json.dumps(tasks, sort_keys=True)
+
+    _run(tasks, pinned_versions={SRC: {"version": 3}})
+
+    assert json.dumps(tasks, sort_keys=True) == before
+
+
+def test_a_task_without_an_aero_block_is_left_alone(sent):
+    _run([{"kwargs": {}, "function": "f", "endpoint": "e"}])
+
+    assert sent["tasks"][0]["kwargs"] == {}
