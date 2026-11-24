@@ -2,6 +2,7 @@ name: ${PROJECT_NAME}
 
 services:
   web:
+    restart: always
     build:
       dockerfile: ./Dockerfiles/Dockerfile.server.dev
 
@@ -58,6 +59,11 @@ services:
           - ${WEB_ALIAS:-web}
 
   nginx:
+    # One nginx is the front door for every instance on the host
+    # (docs/running-multiple-instances.md), so only the instance that owns it
+    # sets NGINX_RESTART=always. Elsewhere it stays "no": a second nginx can't
+    # bind port 80 and would otherwise restart-loop.
+    restart: ${NGINX_RESTART:-no}
     image: nginx
     # Port 80 only. TLS is terminated by a CELS front end which forwards here in
     # the clear, so there is nothing to serve on 443 and no certificate or key
