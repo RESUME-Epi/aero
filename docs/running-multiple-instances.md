@@ -39,6 +39,7 @@ network/volume exist):
 | `ADMINER_PORT` | host port for Adminer | `8080` |
 | `ADMINER_ALIAS` | the `adminer` container's alias on `aero-shared` | `adminer` |
 | `PG_VOLUME` | external Postgres data volume name | `osprey-postgres-data` |
+| `NGINX_RESTART` | nginx restart policy — set `always` only on the instance that runs the front door | `no` |
 
 `web`, `adminer`, and `nginx` are attached to an external `aero-shared` network so the
 single front door can resolve every instance's `web` and `adminer`.
@@ -63,6 +64,7 @@ ADMINER_ALIAS=aero1-adminer
 DB_PORT=5432
 ADMINER_PORT=8080
 PG_VOLUME=osprey-postgres-data
+NGINX_RESTART=always
 ```
 
 `.env.instance2`
