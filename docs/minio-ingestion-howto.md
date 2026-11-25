@@ -4,7 +4,7 @@ Register a MinIO (S3-compatible) object as an AERO data source, then trigger an 
 POSTing a **presigned URL** to the notify webhook. The object is staged **unchanged** into a
 Globus guest collection (raw passthrough); downstream analysis flows read it from there.
 
-Prereqs (see also `minio-presigned-ingestion-plan.md`):
+Prereqs (see also [plans/minio-presigned-ingestion-plan.md](../plans/minio-presigned-ingestion-plan.md)):
 - The **Globus Compute endpoint** (not the AERO server) must be able to reach the MinIO host —
   it performs the HTTPS GET. Self-signed MinIO cert ⇒ install a CA bundle on the endpoint.
 - The endpoint's `user_environment.yaml` must set `AERO_PROFILE` (and `AERO_CONFIG_FILE` if
