@@ -60,7 +60,7 @@ services:
 
   nginx:
     # One nginx is the front door for every instance on the host
-    # (docs/running-multiple-instances.md), so only the instance that owns it
+    # (docs/deploying.md, "Running multiple instances"), so only the instance that owns it
     # sets NGINX_RESTART=always. Elsewhere it stays "no": a second nginx can't
     # bind port 80 and would otherwise restart-loop.
     restart: ${NGINX_RESTART:-no}
