@@ -44,7 +44,7 @@ sudo docker compose -p <project> --env-file <envfile> up web database adminer
 
 `LOG_LEVEL=DEBUG` and `AERO_SEARCH_ENABLED=false` are read from the environment (see
 `docker-compose.yml`). Multi-instance deployment is documented in
-[docs/running-multiple-instances.md](docs/running-multiple-instances.md).
+[docs/deploying.md](docs/deploying.md#running-multiple-instances).
 
 ## Architecture
 
