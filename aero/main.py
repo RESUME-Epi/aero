@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from aero import GLOBUS_CLIENT
+from aero import init_client
 from aero.config import Config
 from aero.routers import data
 from aero.routers import flow
@@ -40,6 +41,9 @@ async def lifespan(app: FastAPI):
 
 
 # app = FastAPI(dependencies=[Depends(get_query_token)])
+if GLOBUS_CLIENT is None:
+    init_client()
+
 app = FastAPI(lifespan=lifespan)
 
 app.include_router(data.router)

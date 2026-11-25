@@ -4,6 +4,7 @@ import pytest
 
 import aero.models.data
 import aero.routers.data as data_router
+
 from aero.routers.data import _normalize_full_url
 from aero.routers.data import _normalize_object_key
 
@@ -20,7 +21,10 @@ ROUTE = "/data/notify"
             "test-bucket/lhs_results.csv",
         ),
         # plain object URL, different host -> same key
-        ("http://127.0.0.1:9000/test-bucket/lhs_results.csv", "test-bucket/lhs_results.csv"),
+        (
+            "http://127.0.0.1:9000/test-bucket/lhs_results.csv",
+            "test-bucket/lhs_results.csv",
+        ),
         # bare bucket/key
         ("test-bucket/lhs_results.csv", "test-bucket/lhs_results.csv"),
         # trailing slash
@@ -37,6 +41,7 @@ def test_normalize_object_key(value, expected):
 
 def test_normalize_object_key_equivalence():
     """A presigned URL, a plain URL, and a bare bucket/key all normalize equal."""
+
     presigned = "https://localhost:9000/traffic/report.xml.gz?X-Amz-Expires=3600"
     plain = "http://127.0.0.1:9000/traffic/report.xml.gz"
     bare = "traffic/report.xml.gz"
@@ -55,7 +60,10 @@ def test_normalize_object_key_equivalence():
             "https://127.0.0.1:9000/dup-bucket/file.csv?X-Amz-Sig=z",
             "127.0.0.1:9000/dup-bucket/file.csv",
         ),
-        ("http://127.0.0.1:9000/dup-bucket/file.csv", "127.0.0.1:9000/dup-bucket/file.csv"),
+        (
+            "http://127.0.0.1:9000/dup-bucket/file.csv",
+            "127.0.0.1:9000/dup-bucket/file.csv",
+        ),
         # trailing slash trimmed
         ("http://minio.other:9000/b/k/", "minio.other:9000/b/k"),
         # bare bucket/key has no host -> just the key (won't match a host-qualified url)

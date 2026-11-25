@@ -1,6 +1,11 @@
-# Endpoint failover
+# Endpoint failover: server internals
 
 Running an analysis somewhere else when its Globus Compute endpoint is down.
+
+This page covers how the server implements failover. For what failover does from a user's point of
+view, and how to set it up and prepare a failover endpoint, see
+[Endpoint failover](https://github.com/RESUME-Epi/aero-client/blob/main/docs/failover.md) in the
+aero-client docs.
 
 ## The problem
 
@@ -124,69 +129,23 @@ The ingestion flow has no such duplication. Its run input carries
 `osprey-worker-endpoint` / `download-function` / `database-commit-function` /
 `user-wrapper-function` as plain keys and no task list.
 
-## Using it
+## Status checks need a credential with a role on the endpoint
 
-```bash
-# At registration, via the `failover:` block in the register YAML
-aero register -f analysis.yaml
+An endpoint's status only answers to a caller holding a role on it. AERO uses
+`FUNCX_SDK_CLIENT_ID` / `FUNCX_SDK_CLIENT_SECRET` for this, falling back to
+`PORTAL_CLIENT_*` — set the former to the confidential client the endpoints were started with.
+Without a role, every check returns `unknown` and failover never fires. This is the one failure
+mode that looks exactly like a working configuration; `GET /flow/{id}/endpoint-status`
+(`aero failover status`) is there to expose it.
 
-# Or afterwards
-aero failover add <flow-id> -e <backup-endpoint> -p 1
-aero failover add <flow-id> -e <second-backup> -p 2 \
-    -u <fn-uuid-registered-on-that-endpoint>
+## Configuration
 
-aero failover list <flow-id>
-aero failover status <flow-id>
-aero failover rm <flow-id> <failover-id>
-```
-
-```yaml
-# analysis.yaml
-endpoint_uuid: 7591d0fb-3d12-4ff8-b8fb-7a51146c4871
-function_uuid: ...
-failover:
-  - endpoint: 0ed1ddbc-ae82-428c-8431-989a295eaa6a
-    priority: 1
-  - endpoint: 3aa0677e-f729-45ba-895c-adc9937fb276
-    priority: 2
-    # that one is on python 3.12, so its functions are different registrations
-    function_uuid: ...
-    pull_function_uuid: ...
-    commit_function_uuid: ...
-```
-
-### Check it before relying on it
-
-```bash
-aero failover status <flow-id>
-```
-
-```
-offline  primary   7591d0fb-3d12-4ff8-b8fb-7a51146c4871
-online   failover  0ed1ddbc-ae82-428c-8431-989a295eaa6a
-```
-
-**If every line says `unknown`, failover will never fire.** An endpoint's status only
-answers to a caller holding a role on it. AERO uses `FUNCX_SDK_CLIENT_ID` /
-`FUNCX_SDK_CLIENT_SECRET` for this, falling back to `PORTAL_CLIENT_*` — set the former to
-the confidential client the endpoints were started with. This is the one failure mode that
-looks exactly like a working configuration, which is what the route is for.
-
-### Preparing the failover endpoint
-
-It is not enough for it to be online:
-
-- `AERO_PROFILE` (and `AERO_CONFIG_FILE` if used) must be set in its
-  `~/.globus_compute/<name>/user_environment.yaml`, matching the primary. Worker functions
-  resolve `CONF` from the *endpoint's* environment at import, not the client's.
-- It must reach whatever the analysis reads — MinIO, the GCS collection — since the
-  endpoint, not the server, performs the HTTPS GET. That includes a CA bundle for a
-  self-signed cert.
-- If it runs a different Python minor version, re-register the functions there and give
-  their uuids on the failover row.
-
-An endpoint reporting `online` with no workers, the wrong profile, or a Python mismatch
-will still fail the run. This is a liveness check, not a readiness check.
+| Variable | Default | |
+|---|---|---|
+| `AERO_FAILOVER_ENABLED` | `true` | `false` turns off both the pre-submit check and failure-triggered failover |
+| `AERO_ENDPOINT_CHECK_TTL` | `30` | Seconds a status verdict is cached per endpoint; `unknown` is held for a quarter of this |
+| `AERO_ENDPOINT_CHECK_TIMEOUT` | `20` | Seconds to wait for one status check |
+| `FUNCX_SDK_CLIENT_ID` / `FUNCX_SDK_CLIENT_SECRET` | `PORTAL_CLIENT_*` | Credential for the status checks; see above |
 
 ## Failure-triggered failover
 

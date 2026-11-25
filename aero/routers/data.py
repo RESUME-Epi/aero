@@ -24,7 +24,7 @@ from sqlalchemy import or_
 from sqlmodel import select
 from sqlmodel import Session
 
-from aero.auth import require_globus_auth
+from aero.globus.auth import require_globus_auth
 from aero.config import Config
 from aero.database import get_session
 from aero.models.data import create_data
@@ -385,7 +385,11 @@ def _attached_flows(session: Session, data: Data) -> list[tuple[Flow, str]]:
     for f in flows:
         produces = any(d.id == data.id for d in f.contributed_to)
         consumes = any(d.id == data.id for d in f.derived_from)
-        role = "both" if produces and consumes else ("ingestion" if produces else "analysis")
+        role = (
+            "both"
+            if produces and consumes
+            else ("ingestion" if produces else "analysis")
+        )
         tagged.append((f, role))
     return tagged
 
@@ -658,9 +662,7 @@ def _concrete_object_url(registered_url: str, object_key: str) -> str:
     return object_key
 
 
-def _match_source_url(
-    urls: list[SourceUrl], object_key: str
-) -> SourceUrl | None:
+def _match_source_url(urls: list[SourceUrl], object_key: str) -> SourceUrl | None:
     """Pick the entry that claims ``object_key``: exact first, else most specific.
 
     Raises 409 only when two patterns are equally specific, which cannot be
@@ -682,9 +684,10 @@ def _match_source_url(
     matches.sort(key=lambda su: _pattern_specificity(su.object_key), reverse=True)
     if len(matches) > 1:
         best, runner_up = matches[0], matches[1]
-        if _pattern_specificity(best.object_key)[:2] == _pattern_specificity(
-            runner_up.object_key
-        )[:2]:
+        if (
+            _pattern_specificity(best.object_key)[:2]
+            == _pattern_specificity(runner_up.object_key)[:2]
+        ):
             raise HTTPException(
                 status_code=409,
                 detail=(
@@ -698,9 +701,7 @@ def _match_source_url(
 def _require_webhook_token(x_aero_token: str | None) -> None:
     """Guard webhook routes with the shared secret when one is configured."""
     if Config.WEBHOOK_SECRET is not None and x_aero_token != Config.WEBHOOK_SECRET:
-        raise HTTPException(
-            status_code=401, detail="Invalid or missing webhook token."
-        )
+        raise HTTPException(status_code=401, detail="Invalid or missing webhook token.")
 
 
 def _resolve_trigger_url(
@@ -745,9 +746,7 @@ def _resolve_notify_target(session: Session, file_id: str) -> tuple[Data, str, s
     """
     target = _normalize_object_key(file_id)
 
-    su = session.exec(
-        select(SourceUrl).where(SourceUrl.object_key == target)
-    ).first()
+    su = session.exec(select(SourceUrl).where(SourceUrl.object_key == target)).first()
     if su is not None:
         return su.type.data, su.object_key, su.url
 
@@ -760,7 +759,7 @@ def _resolve_notify_target(session: Session, file_id: str) -> tuple[Data, str, s
     if su is not None:
         return su.type.data, target, _concrete_object_url(su.url, target)
 
-    candidates = session.exec(select(Data).where(Data.url != None)).all()
+    candidates = session.exec(select(Data).where(Data.url.is_not(None))).all()
     matches = [
         d
         for d in candidates

@@ -1,4 +1,6 @@
 # AERO
+ [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+ [![Tests](https://github.com/RESUME-Epi/aero/actions/workflows/main.yml/badge.svg)](https://github.com/RESUME-Epi/aero/actions/workflows/main.yml)
 
 AERO tracks versioned data sources, records their provenance, and orchestrates
 [Globus Flows](https://www.globus.org/globus-flows-service) over them: when a source changes, the
@@ -8,7 +10,7 @@ back to the inputs it came from.
 This repository is the **server** — a FastAPI + SQLModel service backed by Postgres. It stores
 metadata and submits flow runs; **it never handles data bytes itself**. The functions that pull,
 transform and upload files run on a [Globus Compute](https://www.globus.org/compute) endpoint and
-live in the companion client repo, [aero-client](https://github.com/NSF-RESUME/DSaaS-client), which
+live in the companion client repo, [aero-client](https://github.com/RESUME-Epi/aero-client), which
 also provides the `aero` command-line tool that users register sources and flows with.
 
 ## How it works
@@ -45,8 +47,8 @@ Two variations are supported:
   bytes — nothing is pulled and nothing is staged, and the analysis reads the object directly from
   its URL.
 
-See [docs/typed-notify-sources-plan.md](docs/typed-notify-sources-plan.md) and
-[docs/minio-ingestion-howto.md](docs/minio-ingestion-howto.md).
+See [docs/s3-notify-relay.md](docs/s3-notify-relay.md) for connecting an object store to the
+notify webhook.
 
 ## Running it
 

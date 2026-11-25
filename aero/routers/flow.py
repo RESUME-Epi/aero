@@ -18,7 +18,7 @@ from sqlmodel import Session
 
 from typing import Optional
 
-from aero.auth import require_globus_auth
+from aero.globus.auth import require_globus_auth
 from aero.database import get_session
 
 from aero.globus.health import endpoint_is_up
@@ -99,7 +99,7 @@ class FlowOut(BaseModel):
     description: str | None = Field(default=None)
     timer: int | None = Field(default=None)
     timer_job_id: uuid.UUID | None = Field(default=None)
-    policy: int = Field(nullable=False)
+    policy: int = Field(json_schema_extra={"nullable": False})
     last_executed: datetime | None = Field(default=None)
     user_endpoint: uuid.UUID | None = Field(default=None)
     arg_hash: str | None = Field(default=None)
@@ -130,6 +130,17 @@ def show_flows(
     limit: int = Query(default=15, le=15),
     session: Session = Depends(get_session),
 ):
+    """_summary_
+
+    Args:
+        offset (int, optional): _description_. Defaults to 0.
+        limit (int, optional): _description_. Defaults to Query(default=15, le=15).
+        session (Session, optional): _description_. Defaults to Depends(get_session).
+
+    Returns:
+        _type_: _description_
+    ewrwer
+    """
     flows = session.exec(
         select(Flow).order_by(Flow.id.desc()).offset(offset).limit(limit)
     ).all()

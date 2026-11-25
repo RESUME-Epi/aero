@@ -1,5 +1,4 @@
 from uuid import UUID
-from datetime import datetime
 
 
 from fastapi import APIRouter
@@ -12,7 +11,7 @@ from pydantic import BaseModel
 from sqlmodel import select
 from sqlmodel import Session
 
-from aero.auth import require_globus_auth
+from aero.globus.auth import require_globus_auth
 from aero.database import get_session
 
 from aero.models.data import Data
@@ -30,9 +29,7 @@ router = APIRouter(
 
 
 class ProvRecord(BaseModel):
-    input_data:  dict[
-        str, dict[str, str | bool | int | float | list[str | None] | None]
-    ]
+    input_data: dict[str, dict[str, str | bool | int | float | list[str | None] | None]]
     output_data: dict[
         str, dict[str, str | bool | int | float | list[str | None] | None]
     ]
@@ -46,6 +43,16 @@ def list_prov(
     limit: int = Query(default=15, le=15),
     session: Session = Depends(get_session),
 ):
+    """Get captured provenance records.
+
+    Args:
+        offset (int, optional): Starting provenance records. Defaults to 0.
+        limit (int, optional): Max amount of records to return . Defaults to Query(default=15, le=15).
+        session (Session, optional): FastAPI SQLModel Session. Defaults to Depends(get_session).
+
+    Returns:
+        _type_: _description_
+    """
     provs = session.exec(
         select(Provenance).order_by(Provenance.id.desc()).offset(offset).limit(limit)
     ).all()
@@ -55,6 +62,18 @@ def list_prov(
 @router.post("/new", response_model=Provenance)
 # @authenticated
 def add_record(pr: ProvRecord, session: Session = Depends(get_session)):
+    """Add a provenance record to the database.
+
+    Args:
+        pr (ProvRecord): Provenance record to be added.
+        session (Session, optional): FastAPI SQLModel Session. Defaults to Depends(get_session).
+
+    Raises:
+        HTTPException: _description_
+
+    Returns:
+        ProvRecord: The successfully committed provenance record.
+    """
     try:
         input_versions = [
             session.exec(
