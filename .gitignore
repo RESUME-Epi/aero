@@ -39,3 +39,5 @@ workflow/send-email-test
 *~
 env/
 obsolete/
+
+plans/
