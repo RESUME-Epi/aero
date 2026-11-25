@@ -8,7 +8,7 @@ back to the inputs it came from.
 This repository is the **server** — a FastAPI + SQLModel service backed by Postgres. It stores
 metadata and submits flow runs; **it never handles data bytes itself**. The functions that pull,
 transform and upload files run on a [Globus Compute](https://www.globus.org/compute) endpoint and
-live in the companion client repo, [aero-client](https://github.com/NSF-RESUME/DSaaS-client), which
+live in the companion client repo, [aero-client](https://github.com/RESUME-Epi/aero-client), which
 also provides the `aero` command-line tool that users register sources and flows with.
 
 ## How it works
