@@ -45,8 +45,8 @@ Two variations are supported:
   bytes — nothing is pulled and nothing is staged, and the analysis reads the object directly from
   its URL.
 
-See [plans/typed-notify-sources-plan.md](plans/typed-notify-sources-plan.md) and
-[docs/minio-ingestion-howto.md](docs/minio-ingestion-howto.md).
+See [docs/s3-notify-relay.md](docs/s3-notify-relay.md) for connecting an object store to the
+notify webhook.
 
 ## Running it
 
