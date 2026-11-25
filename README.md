@@ -45,7 +45,7 @@ Two variations are supported:
   bytes — nothing is pulled and nothing is staged, and the analysis reads the object directly from
   its URL.
 
-See [docs/typed-notify-sources-plan.md](docs/typed-notify-sources-plan.md) and
+See [plans/typed-notify-sources-plan.md](plans/typed-notify-sources-plan.md) and
 [docs/minio-ingestion-howto.md](docs/minio-ingestion-howto.md).
 
 ## Running it

@@ -77,7 +77,7 @@ identity to a `Data`. A **source type** (`aero/models/source_type.py`) groups ma
 under one `Data` UUID, so a change to any of them triggers the same analysis. A **no-copy** source
 (`Data.no_copy`) records a version directly from the notify's `etag`/`size` without running any
 flow — nothing is pulled and no bytes are stored; the analysis fetches the object by URL instead.
-Design notes: [docs/typed-notify-sources-plan.md](docs/typed-notify-sources-plan.md).
+Design notes: [plans/typed-notify-sources-plan.md](plans/typed-notify-sources-plan.md).
 
 Per-run values (a presigned URL, the triggering object key) are **deepcopy-injected** into the run
 kwargs and never written back to `Flow.function_args` — see `run_ingestion_flow` and `run_flow` in
