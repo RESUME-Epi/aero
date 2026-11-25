@@ -10,7 +10,7 @@ back to the inputs it came from.
 This repository is the **server** — a FastAPI + SQLModel service backed by Postgres. It stores
 metadata and submits flow runs; **it never handles data bytes itself**. The functions that pull,
 transform and upload files run on a [Globus Compute](https://www.globus.org/compute) endpoint and
-live in the companion client repo, [aero-client](https://github.com/NSF-RESUME/DSaaS-client), which
+live in the companion client repo, [aero-client](https://github.com/RESUME-Epi/aero-client), which
 also provides the `aero` command-line tool that users register sources and flows with.
 
 ## How it works
@@ -47,8 +47,8 @@ Two variations are supported:
   bytes — nothing is pulled and nothing is staged, and the analysis reads the object directly from
   its URL.
 
-See [docs/typed-notify-sources-plan.md](docs/typed-notify-sources-plan.md) and
-[docs/minio-ingestion-howto.md](docs/minio-ingestion-howto.md).
+See [docs/s3-notify-relay.md](docs/s3-notify-relay.md) for connecting an object store to the
+notify webhook.
 
 ## Running it
 
@@ -140,6 +140,10 @@ All configuration is environment variables, read in `aero/config.py`.
 | `AERO_WEBHOOK_SECRET` | Shared secret for the notify webhooks (`X-Aero-Token`). **If unset the webhook routes are unauthenticated.** |
 | `AERO_REQUIRE_AUTH` | `true` to require a Globus bearer token on the regular API. Off by default. |
 | `AERO_AUTH_SCOPE` | Overrides the derived `action_all` scope. |
+| `FUNCX_SDK_CLIENT_ID` / `FUNCX_SDK_CLIENT_SECRET` | Credential used to read Globus Compute endpoint status for [failover](docs/endpoint-failover.md). Falls back to `PORTAL_CLIENT_*`, but an endpoint's status only answers to a caller with a role on it, so the client the endpoints were started with is the one that works. |
+| `AERO_FAILOVER_ENABLED` | `false` to turn endpoint failover off fleet-wide. On by default, but a flow with no failover configured is never status-checked either way. |
+| `AERO_ENDPOINT_CHECK_TTL` | Seconds an endpoint's status verdict is cached. Default `30`; `0` disables caching. |
+| `AERO_ENDPOINT_CHECK_TIMEOUT` | Per-call deadline for a status check, in seconds. Default `20`. |
 | `LOG_LEVEL` | Application log level; `DEBUG` traces request handling. |
 | `PROJECT_NAME`, `SETUP_ENV_SH`, `ROOT_PATH_ARG`, `PG_VOLUME`, `DB_PORT`, `ADMINER_PORT` | Compose-level, for running multiple instances. |
 
@@ -154,6 +158,9 @@ All configuration is environment variables, read in `aero/config.py`.
 | `POST /data/source` | Create a source with no flow attached |
 | `POST /data/{id}/notify`, `POST /data/notify` | Change webhooks (shared-secret auth, not Globus) |
 | `GET /flow/`, `/flow/{id}`, `POST /flow/register` | Register and inspect flows |
+| `POST /flow/{id}/run` | Run an analysis now, on the data it already has |
+| `GET`/`POST /flow/{id}/failover`, `DELETE /flow/{id}/failover/{fid}` | Endpoints a flow falls back to when its own is offline |
+| `GET /flow/{id}/endpoint-status` | Live status of a flow's endpoint and its failovers |
 | `GET /prov/`, `POST /prov/new` | Provenance; `/prov/new` is how running flows report back |
 
 Interactive docs are at `/docs` on a running instance.

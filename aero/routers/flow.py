@@ -21,12 +21,16 @@ from typing import Optional
 from aero.globus.auth import require_globus_auth
 from aero.database import get_session
 
+from aero.globus.health import endpoint_is_up
+from aero.models.failover import FlowFailover
 from aero.models.flows import create_flow
 from aero.models.flows import Flow
 from aero.models.flows import TriggerEnum
 from aero.models.function import Function
 from aero.models.data import Data
+from aero.models.data_version import DataVersion
 from aero.models.source_type import SourceType
+from aero.routers.data import _resolve_trigger_url
 from aero.routers.data import create_source_type
 
 router = APIRouter(
@@ -35,6 +39,38 @@ router = APIRouter(
     dependencies=[Depends(require_globus_auth)],
     responses={404: {"description": "Not found"}},
 )
+
+
+class FailoverIn(BaseModel):
+    endpoint: uuid.UUID
+    priority: int = Field(default=0)
+    # Omit to reuse the flow's own. Set them when the failover endpoint runs a
+    # different Python minor version and the functions had to be re-registered.
+    function_uuid: uuid.UUID | None = Field(default=None)
+    pull_function_uuid: uuid.UUID | None = Field(default=None)
+    commit_function_uuid: uuid.UUID | None = Field(default=None)
+    enabled: bool = Field(default=True)
+
+
+class FailoverOut(BaseModel):
+    id: uuid.UUID
+    flow_id: uuid.UUID
+    priority: int
+    endpoint: uuid.UUID
+    function_id: uuid.UUID | None = Field(default=None)
+    pull_function_id: uuid.UUID | None = Field(default=None)
+    commit_function_id: uuid.UUID | None = Field(default=None)
+    enabled: bool
+
+
+class EndpointStatusOut(BaseModel):
+    endpoint: uuid.UUID
+    role: str  # "primary" or "failover"
+    priority: int | None = Field(default=None)
+    enabled: bool = Field(default=True)
+    # "online", "offline", or "unknown" -- unknown means the check could not
+    # answer, and is never a reason to fail over.
+    status: str
 
 
 class FlowIn(BaseModel):
@@ -50,6 +86,7 @@ class FlowIn(BaseModel):
     timer: int = Field(default=86400)
     email: str | None = Field(default=None)
     flow_kwargs: dict | list = Field(default={})
+    failover: list[FailoverIn] = Field(default=[])
 
 
 class FlowOut(BaseModel):
@@ -139,6 +176,11 @@ class FlowRunIn(BaseModel):
 class FlowRunOut(BaseModel):
     submitted: bool
     reason: str | None = Field(default=None)
+    # Where the run actually went. Nothing persists this -- AERO records no
+    # Globus run id -- so for a submitted run this response and the server log
+    # are the only places the failover decision is visible.
+    endpoint: uuid.UUID | None = Field(default=None)
+    failover: bool = Field(default=False)
     flow: FlowOut
 
 
@@ -188,20 +230,318 @@ def run_flow(
     # _run_flow re-evaluates it rather than taking it as an argument, and agrees:
     # the decision is pure over state that nothing here mutates in between.
     submitted, reason = f._input_run_decision(force=payload.force)
+    # Resolved here rather than left to _run_flow so the response can say which
+    # endpoint the run went to, and only when there is going to be a run: an
+    # endpoint status check for a flow that is about to skip is wasted.
+    target = f._select_run_target() if submitted else None
     f._run_flow(
         session=session,
         force=payload.force,
         trigger_url=payload.trigger_url,
         signed_url=payload.signed_url,
         source_data_id=payload.source_data_id,
+        target=target,
     )
-    return FlowRunOut(submitted=submitted, reason=reason, flow=_flow_out(f))
+    return FlowRunOut(
+        submitted=submitted,
+        reason=reason,
+        endpoint=target.endpoint if target else None,
+        failover=bool(target and target.is_failover),
+        flow=_flow_out(f),
+    )
+
+
+def _get_flow(session: Session, flow_id: uuid.UUID) -> Flow:
+    f = session.exec(select(Flow).where(Flow.id == flow_id)).first()
+    if f is None:
+        raise HTTPException(
+            status_code=404, detail=f"Flow with id {flow_id} was not found."
+        )
+    return f
+
+
+def _validate_failovers(entries: list[FailoverIn], primary: uuid.UUID) -> None:
+    """Reject a failover set that could not be resolved unambiguously.
+
+    Priorities order the chain, so a repeat leaves which endpoint is tried first
+    up to row order. A failover naming the primary is a no-op at best and, since
+    selection only reaches the chain once the primary reports offline, would
+    just resubmit to the endpoint that is down.
+    """
+    priorities = [entry.priority for entry in entries]
+    dupes = sorted({p for p in priorities if priorities.count(p) > 1})
+    if dupes:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Duplicate failover priorities: {dupes}. Each must be unique.",
+        )
+
+    if any(entry.endpoint == primary for entry in entries):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{primary} is the flow's primary endpoint; a failover to it "
+                "would be a no-op."
+            ),
+        )
+
+
+def _failover_row(flow_id: uuid.UUID | None, entry: FailoverIn) -> FlowFailover:
+    return FlowFailover(
+        flow_id=flow_id,
+        priority=entry.priority,
+        endpoint=entry.endpoint,
+        function_id=entry.function_uuid,
+        pull_function_id=entry.pull_function_uuid,
+        commit_function_id=entry.commit_function_uuid,
+        enabled=entry.enabled,
+    )
+
+
+@router.get("/{flow_id}/failover", response_model=list[FailoverOut])
+def list_failover(flow_id: uuid.UUID, session: Session = Depends(get_session)):
+    """The endpoints this flow falls back to, in the order they are tried."""
+    return _get_flow(session, flow_id).failovers
+
+
+@router.post("/{flow_id}/failover", response_model=FailoverOut)
+def add_failover(
+    flow_id: uuid.UUID,
+    payload: FailoverIn,
+    session: Session = Depends(get_session),
+):
+    """Add an endpoint for this flow to fall back to when its own is offline.
+
+    `priority` orders the chain and must be unique within the flow, so which
+    endpoint is tried first is never ambiguous.
+
+    Leave the three function uuids unset to reuse the flow's own. Set them when
+    the failover endpoint runs a different Python minor version: a function
+    registered against one will not deserialize on the other, so it has to be
+    re-registered there and gets a new uuid.
+    """
+    f = _get_flow(session, flow_id)
+    _validate_failovers([payload], f.user_endpoint)
+
+    clash = next((x for x in f.failovers if x.priority == payload.priority), None)
+    if clash is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Flow {flow_id} already has a failover at priority "
+                f"{payload.priority} (endpoint {clash.endpoint})."
+            ),
+        )
+
+    row = _failover_row(flow_id, payload)
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+
+    return row
+
+
+@router.delete("/{flow_id}/failover/{failover_id}", response_model=FailoverOut)
+def delete_failover(
+    flow_id: uuid.UUID,
+    failover_id: uuid.UUID,
+    session: Session = Depends(get_session),
+):
+    """Remove one failover target."""
+    row = session.exec(
+        select(FlowFailover).where(
+            FlowFailover.id == failover_id, FlowFailover.flow_id == flow_id
+        )
+    ).first()
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Flow {flow_id} has no failover with id {failover_id}.",
+        )
+
+    out = FailoverOut.model_validate(row, from_attributes=True)
+    session.delete(row)
+    session.commit()
+
+    return out
+
+
+@router.get("/{flow_id}/endpoint-status", response_model=list[EndpointStatusOut])
+def endpoint_status(flow_id: uuid.UUID, session: Session = Depends(get_session)):
+    """Live status of this flow's endpoint and each of its failovers.
+
+    Bypasses the status cache, so it reports what Globus says right now.
+
+    Worth running once after configuring a failover. An endpoint's status only
+    answers to a caller holding a role on it, and if AERO's credential does not,
+    every entry here reads `unknown` — in which case failover will never fire,
+    because an unanswerable check is not treated as "down".
+    """
+    f = _get_flow(session, flow_id)
+
+    def _status(endpoint) -> str:
+        up = endpoint_is_up(endpoint, use_cache=False)
+        return "unknown" if up is None else ("online" if up else "offline")
+
+    out = [
+        EndpointStatusOut(
+            endpoint=f.user_endpoint, role="primary", status=_status(f.user_endpoint)
+        )
+    ]
+    out.extend(
+        EndpointStatusOut(
+            endpoint=x.endpoint,
+            role="failover",
+            priority=x.priority,
+            enabled=x.enabled,
+            status=_status(x.endpoint),
+        )
+        for x in f.failovers
+    )
+
+    return out
+
+
+class FailoverRunIn(BaseModel):
+    # The endpoint the run failed on. Omitted, it is the flow's primary: a run
+    # handed over by hand means "run this somewhere other than its home".
+    failed_endpoint: uuid.UUID | None = Field(default=None)
+    # Endpoints earlier runs in this chain already failed on. The worker reads
+    # them from its `aero.run` context and sends them back, so the chain never
+    # returns to one of them.
+    tried_endpoints: list[uuid.UUID] = Field(default=[])
+    reason: str | None = Field(default=None)
+    # data id -> DataVersion id: the revisions the failed run processed, so the
+    # re-run processes the same ones. An input left out resolves to its latest.
+    input_versions: dict[uuid.UUID, uuid.UUID] = Field(default={})
+
+
+def _pin_versions(
+    session: Session, f: Flow, input_versions: dict[uuid.UUID, uuid.UUID]
+) -> dict[str, dict]:
+    """The version fields a pinned input needs, keyed by data id.
+
+    The same fields the worker's pull function would have copied from
+    `GET /data/{id}/latest`. A pinned input arrives with its `version` set, so the
+    pull function skips it -- anything not supplied here would simply be missing
+    when the analysis wrapper goes to fetch the file.
+    """
+    inputs = {d.id: d for d in f.derived_from}
+    pins = {}
+    for data_id, version_id in input_versions.items():
+        d = inputs.get(data_id)
+        if d is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{data_id} is not an input of flow {f.id}.",
+            )
+
+        v = session.exec(
+            select(DataVersion).where(
+                DataVersion.id == version_id, DataVersion.data_id == data_id
+            )
+        ).first()
+        if v is None or v.data_file is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{version_id} is not a version of input {data_id}.",
+            )
+
+        pin = {
+            "version": v.version,
+            "version_id": str(v.id),
+            "file_bn": v.data_file.file_name,
+            "encoding": v.data_file.encoding,
+        }
+        if d.no_copy:
+            trigger_url = _resolve_trigger_url(session, d, v.source_key)
+            if trigger_url:
+                pin["trigger_url"] = trigger_url
+        pins[str(data_id)] = pin
+
+    return pins
+
+
+@router.post("/{flow_id}/failover/run", response_model=FlowRunOut)
+def run_on_failover(
+    flow_id: uuid.UUID,
+    payload: FailoverRunIn = FailoverRunIn(),
+    session: Session = Depends(get_session),
+):
+    """Re-run an analysis somewhere other than the endpoint it failed on.
+
+    For a run that reached its endpoint and failed there -- typically called by
+    the analysis itself, through `aero_client.failover.request_failover`, when an
+    HPC job it submitted fails. `POST /flow/{id}/run` would not do: it moves off
+    an endpoint only when that endpoint reports offline, and this one is
+    usually online, so the re-run would go straight back to it.
+
+    The re-run goes to the first candidate not in `failed_endpoint` or
+    `tried_endpoints` and not reporting offline. The candidates are the primary,
+    then the enabled failovers in priority order. Both endpoint lists are passed
+    on to the new run, so if it fails as well and asks again, the chain moves on
+    to the next candidate. It ends with `submitted: false` when no candidate is
+    left.
+
+    Always forced: the failed run already moved `last_executed` past the data it
+    was meant to process. `input_versions` pins the re-run to the revisions the
+    failed run had.
+    """
+    f = _get_flow(session, flow_id)
+    if f.policy not in MANUAL_RUN_POLICIES:
+        supported = ", ".join(f"{p.name} ({p.value})" for p in MANUAL_RUN_POLICIES)
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Flow policy {f.policy} does not support a failover run. "
+                f"Only {supported} do."
+            ),
+        )
+
+    pins = _pin_versions(session, f, payload.input_versions)
+
+    failed = payload.failed_endpoint or f.user_endpoint
+    # Ordered and de-duplicated: the next run gets it back as its own tried list.
+    tried = list(dict.fromkeys([*payload.tried_endpoints, failed]))
+
+    # Forced, but an input with no version at all still cannot run.
+    submitted, reason = f._input_run_decision(force=True)
+    if not submitted:
+        return FlowRunOut(submitted=False, reason=reason, flow=_flow_out(f))
+
+    target = f._select_failover_target(set(tried), reason=payload.reason)
+    if target is None:
+        return FlowRunOut(
+            submitted=False,
+            reason=(
+                "no failover endpoint left to try; tried: "
+                f"{', '.join(str(e) for e in tried)}"
+            ),
+            flow=_flow_out(f),
+        )
+
+    f._run_flow(
+        session=session,
+        force=True,
+        target=target,
+        tried_endpoints=tried,
+        pinned_versions=pins,
+    )
+    return FlowRunOut(
+        submitted=True,
+        endpoint=target.endpoint,
+        failover=target.is_failover,
+        flow=_flow_out(f),
+    )
 
 
 @router.post("/register", response_model=FlowOut)
 # @authenticated
 def register(fi: FlowIn, session: Session = Depends(get_session)):
     fl: Flow | None = None
+
+    _validate_failovers(fi.failover, fi.gc_endpoint)
+
     # check if function already exists
 
     f = session.exec(select(Function).where(Function.id == fi.function_uuid)).first()
@@ -340,6 +680,7 @@ def register(fi: FlowIn, session: Session = Depends(get_session)):
             endpoint=fi.gc_endpoint,
             email=fi.email,
             arg_hash=arg_hash,
+            failovers=[_failover_row(None, entry) for entry in fi.failover],
         )
 
         # After create_flow, the output Data rows are persisted and can be bound to.

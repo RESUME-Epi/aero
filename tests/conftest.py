@@ -12,7 +12,9 @@ from sqlmodel import create_engine
 from sqlmodel import SQLModel
 from sqlmodel.pool import StaticPool
 
+from aero import GLOBUS_CLIENT
 from aero import init_client
+from aero.globus import health
 from aero.globus.utils import FlowEnum
 from aero.globus.utils import FLOW_IDS
 from aero.globus.client import SearchAPIError
@@ -26,6 +28,11 @@ patcher.start()
 
 @pytest.fixture(name="globus_mock", autouse=True)
 def _mock_globus(monkeypatch):
+    # GLOBUS_CLIENT is a proxy, and undoing monkeypatch.setattr(GLOBUS_CLIENT, ...)
+    # leaves the saved method on the proxy itself, bound to that test's client.
+    # Clear it so every test reaches the client init_client() builds below.
+    vars(GLOBUS_CLIENT).clear()
+
     class MockClientApp:
         def __init__(*args, **kwargs):
             pass
@@ -118,7 +125,17 @@ def _mock_globus(monkeypatch):
         mock.patch("aero.globus.client.AuthClient", new=MockAuthClient),
     ):
         init_client()
+
+        # The endpoint health check builds its own Globus Compute client on first
+        # use. Nothing in the suite should reach the network, and an endpoint with
+        # no verdict must never look offline -- stub the query, not the client, so
+        # a test that forgets to configure a status still gets "unknown".
+        monkeypatch.setattr(health, "_query_status", lambda endpoint_uuid: None)
+        health.clear_cache()
+
         yield
+
+    health.clear_cache()
 
 
 @pytest.fixture(name="session")

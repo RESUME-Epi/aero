@@ -44,7 +44,7 @@ sudo docker compose -p <project> --env-file <envfile> up web database adminer
 
 `LOG_LEVEL=DEBUG` and `AERO_SEARCH_ENABLED=false` are read from the environment (see
 `docker-compose.yml`). Multi-instance deployment is documented in
-[docs/running-multiple-instances.md](docs/running-multiple-instances.md).
+[docs/deploying.md](docs/deploying.md#running-multiple-instances).
 
 ## Architecture
 
@@ -77,11 +77,33 @@ identity to a `Data`. A **source type** (`aero/models/source_type.py`) groups ma
 under one `Data` UUID, so a change to any of them triggers the same analysis. A **no-copy** source
 (`Data.no_copy`) records a version directly from the notify's `etag`/`size` without running any
 flow — nothing is pulled and no bytes are stored; the analysis fetches the object by URL instead.
-Design notes: [docs/typed-notify-sources-plan.md](docs/typed-notify-sources-plan.md).
+Design notes: [plans/typed-notify-sources-plan.md](plans/typed-notify-sources-plan.md).
 
 Per-run values (a presigned URL, the triggering object key) are **deepcopy-injected** into the run
 kwargs and never written back to `Flow.function_args` — see `run_ingestion_flow` and `run_flow` in
 `aero/globus/client.py`. Anything persisted there would outlive the signature that made it valid.
+
+### Endpoint failover
+
+A flow can name alternate endpoints (`flowfailover` rows, `aero/models/failover.py`). Before an
+event-driven run, `Flow._select_run_target()` asks `aero/globus/health.py` whether the flow's
+endpoint is online and, if it reports *offline*, picks the first enabled failover that does not.
+Unresolvable (`None`) is never treated as down, and a flow with no failover rows is never checked
+at all. Details: [docs/endpoint-failover.md](docs/endpoint-failover.md).
+
+**The endpoint is stored twice.** `create_flow` writes it to `Flow.user_endpoint` *and* into every
+task dict in `Flow.function_args`, and the user flow's `execute` state dispatches on the latter
+(`$.VersionResult.details.result[0]`, which `get_versions` returns unchanged). Repointing only
+`run_input["endpoint"]` moves the pull and commit but leaves the analysis on the dead endpoint —
+hence the `primary_endpoint` argument to `run_flow`.
+
+**Failure-triggered failover.** `POST /flow/{id}/failover/run` re-runs a run that *reached* its
+endpoint and failed there (an HPC job the analysis submitted, say), via
+`Flow._select_failover_target(exclude)`: the primary, then enabled failovers, skipping the
+endpoints named as failed or already tried. Every analysis run carries
+`aero["run"] = {endpoint, tried_endpoints}` so the worker can send the tried list back; it only
+grows, so a chain that fails everywhere ends with `submitted: false`. `input_versions` pins the
+re-run to the failed run's revisions (`pinned_versions` in `run_flow`).
 
 ## Constraints that bite
 
@@ -147,7 +169,7 @@ malformed search entry, a missing role — will pass locally.
 - Git flow: feature branches off `develop`, `--no-ff` merge; `main` is the release branch.
   Pushes and merges to `main` are done by hand — don't push.
 - Do not put historical information in doc strings. For example, text that explains what a
-  function used to return. Just explain what the fuction or method etc. does now. If the
+  function used to return. Just explain what the function or method etc. does now. If the
   historical information is relevant for your context, put it elsewhere.
   **Tests are the exception**: a regression test's docstring should say what used to break and
   how, because that is the reason the test exists — see the `Regression:` docstrings in
